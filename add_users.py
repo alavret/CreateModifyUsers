@@ -43,7 +43,7 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
 #file_handler = handlers.TimedRotatingFileHandler(LOG_FILE, when='D', interval=1, backupCount=30, encoding='utf-8')
-file_handler = handlers.RotatingFileHandler(LOG_FILE, maxBytes=1024 * 1024,  backupCount=5, encoding='utf-8')
+file_handler = handlers.RotatingFileHandler(LOG_FILE, maxBytes=1024 * 1024 * 10,  backupCount=5, encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:\t%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
 logger.addHandler(console_handler)
@@ -1711,10 +1711,9 @@ def search_department_by_name(settings: "SettingParams", name: str):
         logger.error("Подразделения не найдены.")
     else:
         logger.info(f"Найдено подразделений - {len(target_dep)}")
-        sep = "-"
         for item in target_dep:
             print("\n")
-            logger.info(f"Информация о подразделении: {item['id']} - {item['name']}")
+            logger.info(f"Информация о подразделении: id - {item['id']}, name - {item['name']}")
             logger.info(f"ID          : {item['id']}")
             logger.info(f"ParentId    : {item['parentId']}")
             count = 0
