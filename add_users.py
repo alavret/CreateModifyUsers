@@ -185,19 +185,19 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
             else:
                 entry["password_change_required"] = password_change_required
 
-            temp_langusge = element["language"].lower()
-            if temp_langusge not in ['ru', 'en']:
-                stop_adding = True
-                logger.error(f'Строка #{line_number}. Некорректный язык _"{temp_langusge}"_. Должно быть ru или en. Отмена добавления пользователя.')
+            temp_language = element["language"].lower()
+            if temp_language not in ['ru', 'en']:
+                #stop_adding = True
+                logger.error(f'Строка #{line_number}. Некорректный язык _"{temp_language}"_. Должно быть ru или en. Будет записано пустое значение.')
             else:
-                entry["language"] = temp_langusge
+                entry["language"] = temp_language
 
             temp_gender = element["gender"].lower()
             if temp_gender not in ['male', 'female']:
-                stop_adding = True
-                logger.error(f'Строка #{line_number}. Некорректный пол _"{temp_gender}"_. Должно быть male или female. Отмена добавления пользователя.')
+                #stop_adding = True
+                logger.error(f'Строка #{line_number}. Некорректный пол _"{temp_gender}"_. Должно быть male или female. Будет записано пустое значение.')
             else:
-                entry["gender"] = temp_gender
+                entry["gender"] = temp_gender   
 
             temp_birthday = element["birthday"]
             if temp_birthday:
