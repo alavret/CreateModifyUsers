@@ -20,7 +20,7 @@ LOG_FILE = "add_users.log"
 RETRIES_DELAY_SEC = 2
 SLEEP_TIME_BETWEEN_API_CALLS = 0.5
 ALL_USERS_REFRESH_IN_MINUTES = 15
-
+SENSITIVE_FIELDS = ['password', 'oauth_token', 'access_token', 'token']
 # DEFAULT_PASSWORD_PATTERN is used to validate the password
 DEFAULT_PASSWORD_PATTERN = r'^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]).{10,}$'
 
@@ -286,7 +286,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
         logger.warning(f'В файле есть {len(suspiciose_lines)} некорректных строк. Проверьте кириллические буквы или неподдерживаемые символы в этих полях: login, first_name, last_name, middle_name')
         logger.warning('*' * 100)
         for element in suspiciose_lines:
-            logger.warning(f'login: {element['login']}; first_name: {element['first_name']}; last_name: {element['last_name']}; middle_name: {element['middle_name']}')
+            logger.warning(f'login: {element["login"]}; first_name: {element["first_name"]}; last_name: {element["last_name"]}; middle_name: {element["middle_name"]}')
             logger.warning("." * 100)
         logger.warning('\n')
         if not analyze_only:
@@ -687,7 +687,7 @@ def mask_sensitive_data(data: dict) -> dict:
     masked_data = copy.deepcopy(data)
     
     # Список полей, которые нужно замаскировать
-    sensitive_fields = ['password', 'oauth_token', 'access_token', 'token']
+    sensitive_fields = SENSITIVE_FIELDS
     
     def mask_recursive(obj):
         if isinstance(obj, dict):
@@ -875,7 +875,7 @@ def get_all_api360_users_from_api(settings: "SettingParams"):
             while True:
                 logger.debug(f"GET URL - {url}")
                 response = requests.get(url, headers=headers, params=params)
-                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"!!! ОШИБКА !!! при GET запросе url - {url}: {response.status_code}. Сообщение об ошибке: {response.text}")
                     if retries < MAX_RETRIES:
@@ -988,7 +988,7 @@ def create_user_by_api(settings: "SettingParams", user: dict):
     while True:
         try:
             response = requests.post(f"{url}", headers=headers, json=user)
-            logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during POST request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1019,7 +1019,7 @@ def patch_user_by_api(settings: "SettingParams", user_id: int, patch_data: dict)
     while True:
         try:
             response = requests.patch(f"{url}", headers=headers, json=patch_data)
-            logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"Error during PATCH request: {response.status_code}. Error message: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1054,7 +1054,7 @@ def get_all_api360_departments(settings: "SettingParams"):
             while True:
                 logger.debug(f"GET URL - {url}")
                 response = requests.get(url, headers=headers, params=params)
-                logger.debug(f"x-request-id: {response.headers.get("x-request-id","")}")
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
                 if response.status_code != HTTPStatus.OK.value:
                     logger.error(f"!!! ОШИБКА !!! при GET запросе url - {url}: {response.status_code}. Сообщение об ошибке: {response.text}")
                     if retries < MAX_RETRIES:
@@ -1095,7 +1095,7 @@ def delete_department_by_api(settings: "SettingParams", department: dict):
         retries = 1
         while True:
             response = requests.delete(f"{url}", headers=headers)
-            logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"!!! ОШИБКА !!! при DELETE запросе url - {url}: {response.status_code}. Сообщение об ошибке: {response.text}")
                 if retries < MAX_RETRIES:
@@ -1141,7 +1141,7 @@ def create_department_by_api(settings: "SettingParams", department: dict):
         retries = 1
         while True:
             response = requests.post(f"{url}", headers=headers, json=department)
-            logger.debug(f"x-request-id: {response.headers.get("X-Request-Id","")}")
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
             if response.status_code != HTTPStatus.OK.value:
                 logger.error(f"!!! ОШИБКА !!! при POST запросе url - {url}: {response.status_code}. Сообщение об ошибке: {response.text}")
                 if retries < MAX_RETRIES:
