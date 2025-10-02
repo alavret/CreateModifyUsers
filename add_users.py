@@ -351,7 +351,7 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
 
         if settings.dry_run:
             logger.info(f"Пробный запуск. Пользователь {user['nickname']} ({user['name']['last']} {user['name']['first']}) не будет добавлен.")
-            return False, []
+            #return False, []
         else:
             result, created_user = create_user_by_api(settings, user)
             if result:
@@ -425,6 +425,8 @@ def add_users_from_file(settings: "SettingParams", analyze_only=False):
     if analyze_only:
         return True, data
     result, data = add_users_from_file_phase_2(settings, data)
+    if settings.dry_run:
+        return True, data
     if not result:
         return False, []
     data = add_users_from_file_phase_3(settings, data)
@@ -930,7 +932,7 @@ def get_settings():
         org_id = os.environ.get("ORG_ID"),
         all_users = [],
         all_users_get_timestamp = datetime.now(),
-        dry_run = os.environ.get("DRY_RUN_ARG","false").lower() == "true",
+        dry_run = os.environ.get("DRY_RUN","false").lower() == "true",
         password_pattern = os.environ.get("PASSWORD_PATTERN"),
         deps_file = os.environ.get("DEPS_FILE","deps.csv"),
         all_users_file = os.environ.get("ALL_USERS_FILE","all_users.csv"),
