@@ -704,7 +704,7 @@ def mask_sensitive_data(data: dict) -> dict:
     mask_recursive(masked_data)
     return masked_data
 
-def validate_email(email: str) -> tuple[bool, str]:
+def validate_email(email: str) -> Tuple[bool, str]:
     """
     Проверяет корректность адреса электронной почты.
     
@@ -712,7 +712,7 @@ def validate_email(email: str) -> tuple[bool, str]:
         email (str): Email адрес для проверки
         
     Returns:
-        tuple: (bool, str) - (результат проверки, сообщение об ошибке или "OK")
+        Tuple: (bool, str) - (результат проверки, сообщение об ошибке или "OK")
     """
     if not email:
         return False, "Email адрес не может быть пустым"
@@ -782,7 +782,7 @@ def validate_phone_number(phone):
         phone (str): Номер телефона для проверки
         
     Returns:
-        tuple: (bool, str) - (результат проверки, причина ошибки или очищенный номер)
+        Tuple: (bool, str) - (результат проверки, причина ошибки или очищенный номер)
     """
     if not phone:
         return False, "Номер телефона не может быть пустым"
@@ -1240,7 +1240,7 @@ def prepare_deps_list_from_raw_data(settings: "SettingParams", raw_data):
             else:
                 temp_list.append({'current':item['path'].split(DEPS_SEPARATOR)[i], 'prev':DEPS_SEPARATOR.join(item['path'].split(DEPS_SEPARATOR)[:i]), 'level':i+1, '360id':0, 'prevId':0, 'path':''})
     # Фильрация уникальных значений из списка словарей, полученного на предыдущем этапе
-    final_list = [dict(t) for t in {tuple(d.items()) for d in temp_list}]
+    final_list = [dict(t) for t in {Tuple(d.items()) for d in temp_list}]
     # Заполнение поля path (полный путь к подразделению)
     for item in final_list:
         if not item['current'] == 'All':
