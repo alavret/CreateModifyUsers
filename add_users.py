@@ -89,12 +89,15 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
             logger.debug(f'Headers: {headers}')
             for line in csvfile:
                 logger.debug(f'Чтение строки из файла - {mask_csv_line_safe(line)}')
-                fields = line.replace('"','').split(";")
+                #fields = line.replace('"','').split(";")
+                fields = line.split(";")
                 if len(fields) != len(USERS_CSV_REQUIRED_HEADERS):
                     logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует требуемым заголовкам: {USERS_CSV_REQUIRED_HEADERS}. Возможно, в значении какого-либо поля есть точка с запятой. Попробуйте заменить её на другой символ.')
                     return
                 entry = {}
                 for i,value in enumerate(fields):
+                    # Удаляем кавычки только если они обрамляют всю строку
+                    value = remove_quotes_if_wrapped(value)
                     entry[headers[i].strip()] = value.strip()
                 data.append(entry)
         logger.info(f'Конец чтения файла {users_file_name}')
@@ -632,6 +635,38 @@ def mask_csv_line(line: str, headers: list) -> str:
     
     # Собираем строку обратно
     return ";".join(masked_fields)
+
+def remove_quotes_if_wrapped(text: str) -> str:
+    """
+    Удаляет кавычки из строки только если они находятся в начале и конце строки,
+    и их ровно две (одна в начале, одна в конце).
+    
+    Args:
+        text (str): Строка для обработки
+        
+    Returns:
+        str: Строка без кавычек или исходная строка
+        
+    Examples:
+        remove_quotes_if_wrapped('"это нормальная строка"') -> 'это нормальная строка'
+        remove_quotes_if_wrapped('это неправильная "строка"') -> 'это неправильная "строка"'
+        remove_quotes_if_wrapped('""много"" кавычек') -> '""много"" кавычек'
+    """
+    if not text:
+        return text
+    
+    # Подсчитываем количество кавычек в строке
+    quote_count = text.count('"')
+    
+    # Если кавычек не ровно 2, возвращаем исходную строку
+    if quote_count != 2:
+        return text
+    
+    # Проверяем, что кавычки находятся в начале и конце строки
+    if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+        return text[1:-1]
+    
+    return text
 
 def mask_csv_line_safe(line: str) -> str:
     """
