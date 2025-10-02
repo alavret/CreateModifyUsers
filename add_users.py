@@ -1240,7 +1240,15 @@ def prepare_deps_list_from_raw_data(settings: "SettingParams", raw_data):
             else:
                 temp_list.append({'current':item['path'].split(DEPS_SEPARATOR)[i], 'prev':DEPS_SEPARATOR.join(item['path'].split(DEPS_SEPARATOR)[:i]), 'level':i+1, '360id':0, 'prevId':0, 'path':''})
     # Фильрация уникальных значений из списка словарей, полученного на предыдущем этапе
-    final_list = [dict(t) for t in {Tuple(d.items()) for d in temp_list}]
+    # Удаление дубликатов из списка словарей
+    seen = set()
+    final_list = []
+    for d in temp_list:
+        # Создаем строковое представление словаря для проверки уникальности
+        dict_key = str(sorted(d.items()))
+        if dict_key not in seen:
+            seen.add(dict_key)
+            final_list.append(d)
     # Заполнение поля path (полный путь к подразделению)
     for item in final_list:
         if not item['current'] == 'All':
