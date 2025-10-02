@@ -11,6 +11,7 @@ import sys
 from http import HTTPStatus
 import csv
 import json
+from typing import Tuple
 
 
 DEFAULT_360_API_URL = "https://api360.yandex.net"
@@ -521,9 +522,9 @@ def is_valid_date(date_string, min_years_diff=10, max_years_diff=100):
                 (current_date.day - date_obj.day) / 365.25)
             
             if years_diff < min_years_diff:
-                return False, f"Дата отстоит от текущей менее, чем на {min_years_diff} лет"
+                return False, f'Дата отстоит от текущей менее, чем на {min_years_diff} лет'
             if years_diff > max_years_diff:
-                return False, f"Дата отстоит от текущей более, чем на {max_years_diff} лет"
+                return False, f'Дата отстоит от текущей более, чем на {max_years_diff} лет'
             # Дополнительная проверка на валидность (для високосных лет и т.д.)
             # Эта проверка не требуется, т.к. strptime уже выбросит исключение для невалидной даты
             return True, date_obj
@@ -567,7 +568,7 @@ def is_valid_date(date_string, min_years_diff=10, max_years_diff=100):
     
     return False, None
 
-def validate_password(settings: "SettingParams", password: str) -> tuple[bool, str]:
+def validate_password(settings: "SettingParams", password: str) -> Tuple[bool, str]:
     """
     Проверяет корректность пароля с помощью регулярного выражения.
     
@@ -585,9 +586,9 @@ def validate_password(settings: "SettingParams", password: str) -> tuple[bool, s
         if re.match(pattern, password):
             return True, "OK"
         else:
-            return False, f"Пароль не соответствует требованиям безопасности. Используемый шаблон: {pattern}"
+            return False, f'Пароль не соответствует требованиям безопасности. Используемый шаблон: {pattern}'
     except re.error as e:
-        return False, f"Ошибка в регулярном выражении: {e}"
+        return False, f'Ошибка в регулярном выражении: {e}'
 
 def mask_csv_line(line: str, headers: list) -> str:
     """
@@ -766,7 +767,7 @@ def validate_email(email: str) -> tuple[bool, str]:
         else:
             return False, "Email адрес имеет некорректный формат"
     except re.error as e:
-        return False, f"Ошибка в регулярном выражении: {e}"
+        return False, f'Ошибка в регулярном выражении: {e}'
 
 def validate_phone_number(phone):
     """
@@ -841,12 +842,12 @@ def validate_phone_number(phone):
     
     # Российский формат номера с добавочным номером (если есть)
     if len(clean_number) == 11 and (clean_number.startswith('7') or clean_number.startswith('8')):
-        formatted_number = f"+7 ({clean_number[1:4]}) {clean_number[4:7]}-{clean_number[7:9]}-{clean_number[9:11]}"
+        formatted_number = f'+7 ({clean_number[1:4]}) {clean_number[4:7]}-{clean_number[7:9]}-{clean_number[9:11]}'
         if extension:
-            formatted_number += f" доб. {extension}"
+            formatted_number += f' доб. {extension}'
     # Для других номеров просто добавляем добавочный номер
     elif extension:
-        formatted_number += f" доб. {extension}"
+        formatted_number += f' доб. {extension}'
     
     return True, formatted_number
 
@@ -862,7 +863,7 @@ def get_all_api360_users(settings: "SettingParams", force = False):
 
 def get_all_api360_users_from_api(settings: "SettingParams"):
     logger.info("Получение всех пользователей организации из API...")
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     has_errors = False
     users = []
@@ -967,9 +968,9 @@ def get_settings():
 
 def check_oauth_token(oauth_token, org_id):
     """Проверяет, что токен OAuth действителен."""
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{org_id}/users?perPage=100"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{org_id}/users?perPage=100'
     headers = {
-        "Authorization": f"OAuth {oauth_token}"
+        'Authorization': f'OAuth {oauth_token}'
     }
     response = requests.get(url, headers=headers)
     if response.status_code == HTTPStatus.OK:
@@ -978,7 +979,7 @@ def check_oauth_token(oauth_token, org_id):
 
 def create_user_by_api(settings: "SettingParams", user: dict):
 
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     logger.debug(f"POST URL: {url}")
     logger.debug(f"POST DATA: {mask_sensitive_data(user)}")
@@ -1010,7 +1011,7 @@ def create_user_by_api(settings: "SettingParams", user: dict):
 
 def patch_user_by_api(settings: "SettingParams", user_id: int, patch_data: dict):
 
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     logger.debug(f"PATCH URL: {url}")
     logger.debug(f"PATCH DATA: {mask_sensitive_data(patch_data)}")
@@ -1040,7 +1041,7 @@ def patch_user_by_api(settings: "SettingParams", user_id: int, patch_data: dict)
 
 def get_all_api360_departments(settings: "SettingParams"):
     logger.info("Получение всех подразделений организации из API...")
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
 
     has_errors = False
@@ -1133,7 +1134,7 @@ def delete_all_departments(settings: "SettingParams"):
 
 def create_department_by_api(settings: "SettingParams", department: dict):
     logger.info(f"Создание подразделения {department['name']} в API...")
-    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments"
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
     logger.debug(f"POST URL: {url}")
     logger.debug(f"POST DATA: {department}")
@@ -1621,7 +1622,7 @@ def show_user_attributes(settings: "SettingParams", answer):
                         logger.info("Подразделение не указано")
                     else:
                         department = next((d for d in departments if d['id'] == v), None)
-                        logger.info(f"departmentId: {department['id']}")
+                        logger.info(f'departmentId: {department["id"]}')
                         logger.info(f"Department: {department['path']}")
                 elif k.lower() == "contacts":
                     f.write("Contacts:\n")
