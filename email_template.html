@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Добро пожаловать в Yandex 360</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: #ffcc00;
+            padding: 20px;
+            text-align: center;
+            border-radius: 5px 5px 0 0;
+        }
+        .content {
+            background-color: #f9f9f9;
+            padding: 30px;
+            border: 1px solid #ddd;
+        }
+        .footer {
+            background-color: #333;
+            color: #fff;
+            padding: 15px;
+            text-align: center;
+            font-size: 12px;
+            border-radius: 0 0 5px 5px;
+        }
+        .credentials {
+            background-color: #fff;
+            padding: 15px;
+            margin: 20px 0;
+            border-left: 4px solid #ffcc00;
+            border-radius: 3px;
+        }
+        .credentials strong {
+            color: #d00;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: #ffcc00;
+            color: #000;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        .warning {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px;
+            margin: 15px 0;
+            border-radius: 3px;
+        }
+        .info-box {
+            background-color: #f9f9f9;
+            border-left: 4px solid #4CAF50;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .info-label {
+            font-weight: bold;
+            color: #555555;
+            margin-bottom: 5px;
+        }
+        .info-value {
+            font-size: 18px;
+            color: #333333;
+            padding: 8px 12px;
+            background-color: #ffffff;
+            border-radius: 4px;
+            display: inline-block;
+            margin-top: 5px;
+            font-family: 'Courier New', monospace;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Добро пожаловать в Yandex 360!</h1>
+    </div>
+    
+    <div class="content">
+        <p>Здравствуйте, <strong>{{first_name}} {{middle_name}} {{last_name}}</strong>!</p>
+        
+        <p>Для вас был создан аккаунт в системе Yandex 360 для бизнеса.</p>
+        
+        <div class="credentials">
+            <h3>Ваши учетные данные:</h3>
+            <div class="info-box">
+                <div class="info-label">Ваш логин:</div>
+                <div class="info-value">{{login}}@{{domain}}</div>
+            </div>
+            
+            <div class="info-box">
+                <div class="info-label">Ваш новый пароль:</div>
+                <div class="info-value">{{password}}</div>
+            </div>
+            {{#if department}}
+            <p><strong>Подразделение:</strong> {{department}}</p>
+            {{/if}}
+            {{#if position}}
+            <p><strong>Должность:</strong> {{position}}</p>
+            {{/if}}
+        </div>
+        
+        <div class="warning">
+            <strong>⚠️ Важно!</strong> 
+            {{#if password_change_required}}
+            <p>При первом входе в систему вам будет предложено изменить временный пароль на постоянный.</p>
+            {{else}}
+            <p>Рекомендуем сменить пароль после первого входа в систему для обеспечения безопасности вашего аккаунта.</p>
+            {{/if}}
+        </div>
+        
+        <p style="text-align: center;">
+            <a href="https://passport.yandex.ru/auth?retpath=https%3A%2F%2F360.yandex.ru%2F&origin=tuning360" class="button">Войти в Yandex 360</a>
+        </p>
+        
+        <h3>Что дальше?</h3>
+        <ol>
+            <li>Перейдите по ссылке выше или откройте <a href="https://360.yandex.ru">https://360.yandex.ru</a> и затем нажмите кнопку "Войти" в правом верхнем углу.</li>
+            <li>Введите ваш логин и временный пароль</li>
+            <li>{{#if password_change_required}}Измените пароль на постоянный{{else}}Начните работу с сервисами Yandex 360{{/if}}</li>
+            <li>Настройте свой профиль и начните работу</li>
+        </ol>
+        
+        <p>Если у вас возникли вопросы, обратитесь к вашему системному администратору.</p>
+        
+        <p>С уважением,<br>
+        Команда администрирования Yandex 360</p>
+    </div>
+    
+    <div class="footer">
+        <p>Это автоматическое сообщение. Пожалуйста, не отвечайте на него.</p>
+        <p>© {{year}} Yandex 360 для бизнеса</p>
+    </div>
+</body>
+</html>
+

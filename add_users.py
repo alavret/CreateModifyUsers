@@ -12,6 +12,12 @@ from http import HTTPStatus
 import csv
 import json
 from typing import Tuple
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.header import Header
+import secrets
+import string
 
 
 DEFAULT_360_API_URL = "https://api360.yandex.net"
@@ -37,6 +43,11 @@ DEPARTMENTS_PER_PAGE_FROM_API = 100
 DEPS_SEPARATOR = '|'
 
 EXIT_CODE = 1
+
+# Email constants
+EMAIL_TEMPLATE_FILE = "email_template.html"
+PASSWORD_CHANGE_TEMPLATE_FILE = "password_change_template.html"
+SMTP_TIMEOUT = 10
 
 logger = logging.getLogger("add_users.log")
 logger.setLevel(logging.DEBUG)
@@ -88,6 +99,10 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 return
             logger.debug(f'Headers: {headers}')
             for line in csvfile:
+                if line.startswith('#'):
+                    logger.debug(f'Строка начинается с "#"Пропуск строки из файла - {mask_csv_line_safe(line)}')
+                    continue
+                
                 logger.debug(f'Чтение строки из файла - {mask_csv_line_safe(line)}')
                 #fields = line.replace('"','').split(";")
                 fields = line.split(";")
@@ -179,8 +194,14 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 else:
                     entry["password"] = temp_password
             else:
-                stop_adding = True
-                logger.error(f'Строка #{line_number}. Пароль пуст. Отмена добавления пользователя.')
+                # Если пароль пустой, проверяем возможность автогенерации
+                if settings.auto_generate_password:
+                    generated_password = generate_temp_password(settings.generated_password_length)
+                    logger.info(f'Строка #{line_number}. Пароль не указан. Сгенерирован временный пароль длиной {len(generated_password)} символов.')
+                    entry["password"] = generated_password
+                else:
+                    stop_adding = True
+                    logger.error(f'Строка #{line_number}. Пароль пуст. Отмена добавления пользователя.')
 
             password_change_required = element["password_change_required"].lower()
             if password_change_required not in ['true', 'false']:
@@ -364,6 +385,22 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
                     "department": u['department']
                 }
                 added_users.append(temp_dict)
+                
+                # Отправка приветственного письма
+                if settings.send_welcome_email:
+                    # Добавляем данные для email шаблона
+                    email_data = {
+                        'first': u.get('first'),
+                        'middle': u.get('middle'),
+                        'last': u.get('last'),
+                        'login': u.get('login'),
+                        'password': u.get('password'),
+                        'password_change_required': u.get('password_change_required'),
+                        'position': u.get('position'),
+                        'department_name': u.get('department').split(DEPS_SEPARATOR)[-1] if not u.get('department', '').isdigit() else '',
+                        'personal_email': u.get('personal_email')
+                    }
+                    send_welcome_email(settings, email_data)
 
     return True,added_users
 
@@ -434,6 +471,435 @@ def add_users_from_file(settings: "SettingParams", analyze_only=False):
         return False, []
     data = add_users_from_file_phase_3(settings, data)
     return True, data
+
+def update_users_from_file_phase_1(settings: "SettingParams"):
+    """
+    Фаза 1: Чтение и валидация данных из файла для обновления пользователей
+    """
+    logger.info("-" * 100)
+    logger.info(f'Чтение пользователей из файла {settings.users_file} и проверка корректности данных для обновления.')
+    logger.info("-" * 100)
+    users_file_name = settings.users_file
+    if not os.path.exists(users_file_name):
+        full_path = os.path.join(os.path.dirname(__file__), users_file_name)
+        if not os.path.exists(full_path):
+            logger.error(f'Ошибка! Файл {users_file_name} не существует!')
+            return False, []
+        else:
+            users_file_name = full_path
+    
+    headers = []
+    data = []
+    try:
+        logger.info("-" *100)
+        logger.info(f'Чтение файла {users_file_name}')
+        logger.info("-" *100)
+        bad_header = False
+        with open(users_file_name, 'r', encoding='utf-8') as csvfile:
+            headers = csvfile.readline().replace('"', '').split(";")
+            for header in headers:
+                if header.strip() not in USERS_CSV_REQUIRED_HEADERS:
+                    logger.error(f'Ошибка! Заголовок {header} не соответствует требуемым: {";".join(USERS_CSV_REQUIRED_HEADERS)}')
+                    bad_header = True
+            if bad_header:
+                return False, []
+            logger.debug(f'Headers: {headers}')
+            for line in csvfile:
+                if line.startswith('#'):
+                    logger.debug(f'Строка начинается с "#". Пропуск строки из файла - {mask_csv_line_safe(line)}')
+                    continue
+                
+                logger.debug(f'Чтение строки из файла - {mask_csv_line_safe(line)}')
+                fields = line.split(";")
+                if len(fields) != len(USERS_CSV_REQUIRED_HEADERS):
+                    logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует требуемым заголовкам: {USERS_CSV_REQUIRED_HEADERS}.')
+                    return False, []
+                entry = {}
+                for i,value in enumerate(fields):
+                    value = remove_quotes_if_wrapped(value)
+                    entry[headers[i].strip()] = value.strip()
+                data.append(entry)
+        logger.info(f'Конец чтения файла {users_file_name}')
+        logger.info("\n")
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return False, []
+
+    correct_lines = []
+    error_lines = []
+    line_number = 0
+
+    logger.info("-" *100)
+    logger.info('Проверка корректности данных для обновления.')
+    logger.info("-" *100)
+    api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
+    
+    for element in data:
+        entry = {}
+        stop_updating = False
+        line_number += 1
+        logger.debug(f'Обработка строки #{line_number} {mask_sensitive_data(element)}')
+        
+        try:
+            # Логин (обязательное поле для поиска пользователя)
+            temp_login = element["login"].lower()
+            if temp_login:
+                if '@' in temp_login:
+                    temp_login = element["login"].split('@')[0]
+                
+                # Ищем пользователя
+                found, existing_user = find_user_by_login(settings, temp_login)
+                if not found:
+                    logger.error(f'Строка #{line_number}. Пользователь с логином "{temp_login}" не найден в системе. Обновление отменено.')
+                    stop_updating = True
+                else:
+                    entry["login"] = temp_login
+                    entry["user_id"] = existing_user["id"]
+                    entry["existing_user"] = existing_user
+                    logger.info(f'Строка #{line_number}. Найден пользователь: {existing_user["nickname"]} (ID: {existing_user["id"]})')
+            else:
+                stop_updating = True
+                logger.error(f'Строка #{line_number}. Логин пуст. Отмена обновления пользователя.')
+
+            if stop_updating:
+                error_lines.append(element)
+                continue
+
+            # Имя
+            temp_first_name = element["first_name"]
+            if temp_first_name:
+                if not validate_name(temp_first_name):
+                    logger.warning(f'Строка #{line_number}. Возможное некорректное имя пользователя _"{temp_first_name}"_')
+                entry["first"] = temp_first_name
+            # Если пустое - не обновляем
+
+            # Фамилия
+            temp_last_name = element["last_name"]
+            if temp_last_name:
+                if not validate_name(temp_last_name):
+                    logger.warning(f'Строка #{line_number}. Возможная некорректная фамилия пользователя _"{temp_last_name}"_')
+                entry["last"] = temp_last_name
+
+            # Отчество
+            temp_middle_name = element["middle_name"]
+            if temp_middle_name:
+                if not validate_name(temp_middle_name):
+                    logger.warning(f'Строка #{line_number}. Возможное некорректное отчество пользователя _"{temp_middle_name}"_')
+                entry["middle"] = temp_middle_name
+
+            # Обработка пароля
+            temp_password = element["password"]
+            password_change_required = element["password_change_required"].lower()
+            
+            if password_change_required not in ['true', 'false', '']:
+                logger.error(f'Строка #{line_number}. Некорректный параметр password_change_required _"{password_change_required}"_. Должно быть true, false или пусто.')
+                error_lines.append(element)
+                continue
+            
+            # Если password_change_required = true и password пустой - генерируем новый пароль
+            if password_change_required == 'true' and not temp_password:
+                if settings.auto_generate_password:
+                    generated_password = generate_temp_password(settings.generated_password_length)
+                    logger.info(f'Строка #{line_number}. Пароль будет сгенерирован автоматически (длина {len(generated_password)} символов).')
+                    entry["password"] = generated_password
+                    entry["password_was_generated"] = True
+                else:
+                    logger.error(f'Строка #{line_number}. Требуется изменение пароля, но пароль не указан и автогенерация отключена.')
+                    error_lines.append(element)
+                    continue
+            elif temp_password:
+                # Если пароль указан, проверяем его
+                password_valid, password_message = validate_password(settings, temp_password)
+                if not password_valid:
+                    logger.error(f'Строка #{line_number}. Некорректный пароль: {password_message}')
+                    error_lines.append(element)
+                    continue
+                else:
+                    entry["password"] = temp_password
+                    entry["password_was_generated"] = False
+            
+            if password_change_required:
+                entry["password_change_required"] = password_change_required
+
+            # Язык
+            temp_language = element["language"].lower()
+            if temp_language:
+                if temp_language not in ['ru', 'en']:
+                    logger.error(f'Строка #{line_number}. Некорректный язык _"{temp_language}"_. Должно быть ru или en.')
+                else:
+                    entry["language"] = temp_language
+
+            # Пол
+            temp_gender = element["gender"].lower()
+            if temp_gender:
+                if temp_gender not in ['male', 'female']:
+                    logger.error(f'Строка #{line_number}. Некорректный пол _"{temp_gender}"_. Должно быть male или female.')
+                else:
+                    entry["gender"] = temp_gender
+
+            # Дата рождения
+            temp_birthday = element["birthday"]
+            if temp_birthday:
+                check_date, date_value = is_valid_date(temp_birthday)
+                if not check_date:
+                    logger.error(f'Строка #{line_number}. Некорректная дата рождения _"{temp_birthday}"_ ({date_value}).')
+                else:
+                    entry["birthday"] = date_value.strftime('%Y-%m-%d')
+
+            # Должность
+            if element["position"]:
+                entry["position"] = element["position"]
+
+            # Подразделение
+            if element["department"]:
+                entry["department"] = element["department"]
+                if entry["department"].isdigit():
+                    if int(entry["department"]) > 1:
+                        found_dep = False
+                        for dep in api_deps_hierarchy:
+                            if dep['id'] == int(entry["department"]):
+                                found_dep = True
+                                break
+                        if not found_dep:
+                            logger.error(f'Строка #{line_number}. Подразделение с номером {entry["department"]} не найдено в организации.')
+
+            # Рабочий телефон
+            temp_work_phone = element["work_phone"]
+            if temp_work_phone:
+                check_phone, phone_value = validate_phone_number(temp_work_phone)
+                if not check_phone:
+                    logger.error(f'Строка #{line_number}. Некорректный рабочий телефон _"{temp_work_phone}"_.')
+                else:
+                    entry["work_phone"] = phone_value
+
+            # Мобильный телефон
+            temp_mobile_phone = element["mobile_phone"]
+            if temp_mobile_phone:
+                check_phone, phone_value = validate_phone_number(temp_mobile_phone)
+                if not check_phone:
+                    logger.error(f'Строка #{line_number}. Некорректный мобильный телефон _"{temp_mobile_phone}"_.')
+                else:
+                    entry["mobile_phone"] = phone_value
+
+            # Личный email
+            temp_personal_email = element["personal_email"]
+            if temp_personal_email:
+                check_email, email_value = validate_email(temp_personal_email)
+                if not check_email:
+                    logger.error(f'Строка #{line_number}. Некорректный личный email _"{temp_personal_email}"_.')
+                else:
+                    entry["personal_email"] = temp_personal_email
+
+            correct_lines.append(entry)
+
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            error_lines.append(element)
+
+        logger.debug("." * 100)
+
+    logger.info('Конец проверки корректности данных.')
+    logger.info("\n")
+
+    if len(error_lines) > 0:
+        logger.error('!' * 100)
+        logger.error('Некорректные строки в файле. Исправьте их и попробуйте снова.')
+        logger.error('!' * 100)
+        for element in error_lines:
+            logger.error(f'Bad line: {mask_sensitive_data(element)}')
+            logger.error("." * 100)
+        logger.error('Выход.')
+        logger.error('\n')
+        return False, []
+    
+    return True, correct_lines
+
+def update_users_from_file_phase_2(settings: "SettingParams", users: list):
+    """
+    Фаза 2: Обновление пользователей в Yandex 360
+    """
+    logger.info("-" * 100)
+    if len(users) == 0:
+        logger.info('Нет пользователей для обновления.')
+        return True, []
+    logger.info(f'Обновление {len(users)} пользователей в Y360.')
+    logger.info("-" * 100)
+    
+    updated_users = []
+    api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
+    
+    for u in users:
+        try:
+            existing_user = u.get('existing_user')
+            user_id = u.get('user_id')
+            changes = {}
+            password_changed = False
+            
+            logger.info(f"Обработка пользователя: {u.get('login')} (ID: {user_id})")
+            
+            # Проверяем изменения в имени
+            if u.get('first') and existing_user['name'].get('first') != u.get('first'):
+                if 'name' not in changes:
+                    changes['name'] = {}
+                changes['name']['first'] = u.get('first')
+                logger.debug(f"  Изменение имени: {existing_user['name'].get('first')} -> {u.get('first')}")
+            
+            if u.get('last') and existing_user['name'].get('last') != u.get('last'):
+                if 'name' not in changes:
+                    changes['name'] = {}
+                changes['name']['last'] = u.get('last')
+                logger.debug(f"  Изменение фамилии: {existing_user['name'].get('last')} -> {u.get('last')}")
+            
+            if u.get('middle') and existing_user['name'].get('middle') != u.get('middle'):
+                if 'name' not in changes:
+                    changes['name'] = {}
+                changes['name']['middle'] = u.get('middle')
+                logger.debug(f"  Изменение отчества: {existing_user['name'].get('middle')} -> {u.get('middle')}")
+            
+            # Проверяем изменение пароля
+            if u.get('password'):
+                changes['password'] = u.get('password')
+                password_changed = True
+                logger.debug("  Изменение пароля")
+            
+            if u.get('password_change_required'):
+                changes['passwordChangeRequired'] = u.get('password_change_required')
+                logger.debug(f"  Установка passwordChangeRequired: {u.get('password_change_required')}")
+            
+            # Должность
+            if u.get('position') and existing_user.get('position') != u.get('position'):
+                changes['position'] = u.get('position')
+                logger.debug(f"  Изменение должности: {existing_user.get('position')} -> {u.get('position')}")
+            
+            # Язык
+            if u.get('language') and existing_user.get('language') != u.get('language'):
+                changes['language'] = u.get('language')
+                logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
+            
+            # Пол
+            if u.get('gender') and existing_user.get('gender') != u.get('gender'):
+                changes['gender'] = u.get('gender')
+                logger.debug(f"  Изменение пола: {existing_user.get('gender')} -> {u.get('gender')}")
+            
+            # Дата рождения
+            if u.get('birthday') and existing_user.get('birthday') != u.get('birthday'):
+                changes['birthday'] = u.get('birthday')
+                logger.debug(f"  Изменение даты рождения: {existing_user.get('birthday')} -> {u.get('birthday')}")
+            
+            # Обработка контактов (телефоны)
+            contacts_changed = False
+            new_contacts = []
+            
+            # Копируем существующие контакты, кроме телефонов (которые будем обновлять)
+            for contact in existing_user.get('contacts', []):
+                if contact['type'] != 'phone':
+                    new_contacts.append(contact)
+            
+            # Добавляем новые телефоны
+            if u.get('work_phone'):
+                new_contacts.append({
+                    "type": "phone",
+                    "value": u.get('work_phone'),
+                    'label': 'Work'
+                })
+                contacts_changed = True
+            
+            if u.get('mobile_phone'):
+                new_contacts.append({
+                    "type": "phone",
+                    "value": u.get('mobile_phone'),
+                    'label': 'Mobile'
+                })
+                contacts_changed = True
+            
+            if contacts_changed:
+                changes['contacts'] = new_contacts
+                logger.debug("  Обновление контактов")
+            
+            # Обновление personal_email в поле about
+            if u.get('personal_email'):
+                new_about = json.dumps({"email": u.get('personal_email')})
+                if existing_user.get('about') != new_about:
+                    changes['about'] = new_about
+                    logger.debug("  Обновление about (personal_email)")
+            
+            # Подразделение
+            if u.get('department'):
+                dep_id = None
+                if u['department'].isdigit():
+                    dep_id = int(u['department'])
+                else:
+                    # Ищем подразделение по пути
+                    strip_list = [x.strip() for x in u['department'].split(DEPS_SEPARATOR)]
+                    user_dep = DEPS_SEPARATOR.join(strip_list)
+                    for dep in api_deps_hierarchy:
+                        if dep['path'] == user_dep:
+                            dep_id = dep['id']
+                            break
+                
+                if dep_id and existing_user.get('departmentId') != dep_id:
+                    changes['departmentId'] = dep_id
+                    logger.debug(f"  Изменение подразделения: {existing_user.get('departmentId')} -> {dep_id}")
+            
+            # Если есть изменения - применяем их
+            if changes:
+                if settings.dry_run:
+                    logger.info(f"Пробный запуск. Пользователь {u.get('login')} не будет обновлен. Изменения: {mask_sensitive_data(changes)}")
+                else:
+                    result = patch_user_by_api(settings, user_id=user_id, patch_data=changes)
+                    if result:
+                        logger.info(f"Успех - пользователь {u.get('login')} обновлен.")
+                        updated_users.append(u)
+                        
+                        # Если пароль был изменен - отправляем письмо
+                        if password_changed:
+                            # Извлекаем personal_email из about
+                            personal_email = u.get('personal_email', '')
+                            if not personal_email:
+                                # Пытаемся извлечь из existing_user
+                                try:
+                                    about_data = json.loads(existing_user.get('about', '{}'))
+                                    personal_email = about_data.get('email', '')
+                                except Exception:
+                                    pass
+                            
+                            if personal_email:
+                                email_data = {
+                                    'first': u.get('first') or existing_user['name'].get('first'),
+                                    'middle': u.get('middle') or existing_user['name'].get('middle'),
+                                    'last': u.get('last') or existing_user['name'].get('last'),
+                                    'login': u.get('login'),
+                                    'password': u.get('password'),
+                                    'password_change_required': u.get('password_change_required', 'false'),
+                                    'personal_email': personal_email
+                                }
+                                send_password_change_email(settings, email_data)
+                            else:
+                                logger.warning("Не найден personal_email для отправки письма пользователю %s", u.get('login'))
+                    else:
+                        logger.error(f"Ошибка при обновлении пользователя {u.get('login')}")
+            else:
+                logger.info(f"Нет изменений для пользователя {u.get('login')}")
+        
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            continue
+    
+    logger.info("-" * 100)
+    logger.info(f'Обновление пользователей завершено. Обновлено: {len(updated_users)}')
+    logger.info("-" * 100)
+    return True, updated_users
+
+def update_users_from_file(settings: "SettingParams"):
+    """
+    Основная функция для обновления пользователей из файла
+    """
+    result, data = update_users_from_file_phase_1(settings)
+    if not result:
+        return False, []
+    
+    result, data = update_users_from_file_phase_2(settings, data)
+    return result, data
 
 # Регулярное выражение для проверки фамилии
 def validate_name(line):
@@ -573,6 +1039,57 @@ def is_valid_date(date_string, min_years_diff=10, max_years_diff=100):
     
     return False, None
 
+def generate_temp_password(length: int = 12) -> str:
+    """
+    Генерирует временный пароль средней сложности.
+    
+    Пароль содержит:
+    - Минимум одну заглавную букву
+    - Минимум одну строчную букву
+    - Минимум одну цифру
+    - Минимум один специальный символ
+    - Общая длина не менее 12 символов (по умолчанию)
+    
+    Args:
+        length (int): Длина пароля (минимум 12 символов)
+        
+    Returns:
+        str: Сгенерированный пароль
+        
+    Example:
+        generate_temp_password(12) -> 'Ab3$xY9mNp2!'
+    """
+    if length < 12:
+        length = 12
+    
+    # Определяем наборы символов
+    uppercase_letters = string.ascii_uppercase
+    lowercase_letters = string.ascii_lowercase
+    digits = string.digits
+    special_chars = '!@#$%^&*()_+-=[]{}|'
+    
+    # Гарантируем наличие минимум одного символа каждого типа
+    password_chars = [
+        secrets.choice(uppercase_letters),
+        secrets.choice(lowercase_letters),
+        secrets.choice(digits),
+        secrets.choice(special_chars)
+    ]
+    
+    # Заполняем остаток пароля случайными символами из всех категорий
+    all_chars = uppercase_letters + lowercase_letters + digits + special_chars
+    password_chars.extend(secrets.choice(all_chars) for _ in range(length - 4))
+    
+    # Перемешиваем символы для случайного порядка
+    # Используем secrets.SystemRandom для криптографически стойкого перемешивания
+    rng = secrets.SystemRandom()
+    rng.shuffle(password_chars)
+    
+    # Преобразуем список в строку
+    password = ''.join(password_chars)
+    
+    return password
+
 def validate_password(settings: "SettingParams", password: str) -> Tuple[bool, str]:
     """
     Проверяет корректность пароля с помощью регулярного выражения.
@@ -635,6 +1152,233 @@ def mask_csv_line(line: str, headers: list) -> str:
     
     # Собираем строку обратно
     return ";".join(masked_fields)
+
+def load_email_template(template_file: str) -> str:
+    """
+    Загружает HTML-шаблон email из файла.
+    
+    Args:
+        template_file (str): Путь к файлу шаблона
+        
+    Returns:
+        str: Содержимое шаблона или None в случае ошибки
+    """
+    template_path = template_file
+    if not os.path.exists(template_path):
+        template_path = os.path.join(os.path.dirname(__file__), template_file)
+        if not os.path.exists(template_path):
+            logger.error(f'Файл шаблона email {template_file} не найден!')
+            return None
+    
+    try:
+        with open(template_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Ошибка при чтении файла шаблона email: {type(e).__name__}: {e}")
+        return None
+
+def render_email_template(template: str, user_data: dict, settings: "SettingParams") -> str:
+    """
+    Заполняет шаблон email данными пользователя.
+    Упрощенная версия шаблонизатора для подстановки значений.
+    
+    Args:
+        template (str): HTML-шаблон
+        user_data (dict): Данные пользователя
+        settings (SettingParams): Настройки приложения
+        
+    Returns:
+        str: HTML с подставленными данными
+    """
+    # Базовые подстановки
+    rendered = template.replace('{{first_name}}', user_data.get('first', ''))
+    rendered = rendered.replace('{{middle_name}}', user_data.get('middle', ''))
+    rendered = rendered.replace('{{last_name}}', user_data.get('last', ''))
+    rendered = rendered.replace('{{login}}', user_data.get('login', ''))
+    rendered = rendered.replace('{{password}}', user_data.get('password', ''))
+    rendered = rendered.replace('{{position}}', user_data.get('position', ''))
+    rendered = rendered.replace('{{department}}', user_data.get('department_name', ''))
+    rendered = rendered.replace('{{domain}}', settings.email_domain if hasattr(settings, 'email_domain') else '')
+    rendered = rendered.replace('{{year}}', str(datetime.now().year))
+    
+    # Условные блоки для password_change_required
+    password_change_required = user_data.get('password_change_required', 'false').lower() == 'true'
+    
+    # Простая обработка условных блоков {{#if password_change_required}}...{{/if}}
+    if password_change_required:
+        # Удаляем альтернативный блок {{else}}...{{/if}} вместе с тегами
+        rendered = re.sub(r'\{\{else\}\}.*?\{\{/if\}\}', '', rendered, flags=re.DOTALL)
+        # Теперь удаляем открывающий тег {{#if password_change_required}}, оставляя содержимое
+        rendered = re.sub(r'\{\{#if password_change_required\}\}', '', rendered)
+    else:
+        # Удаляем блок между {{#if password_change_required}} и {{else}} или {{/if}}
+        rendered = re.sub(r'\{\{#if password_change_required\}\}.*?\{\{else\}\}', '', rendered, flags=re.DOTALL)
+        rendered = re.sub(r'\{\{#if password_change_required\}\}.*?\{\{/if\}\}', '', rendered, flags=re.DOTALL)
+    
+    # Обработка условных блоков для department и position
+    if user_data.get('department_name'):
+        rendered = re.sub(r'\{\{#if department\}\}', '', rendered)
+    else:
+        rendered = re.sub(r'\{\{#if department\}\}.*?\{\{/if\}\}', '', rendered, flags=re.DOTALL)
+    
+    if user_data.get('position'):
+        rendered = re.sub(r'\{\{#if position\}\}', '', rendered)
+    else:
+        rendered = re.sub(r'\{\{#if position\}\}.*?\{\{/if\}\}', '', rendered, flags=re.DOTALL)
+    
+    # Удаляем оставшиеся теги
+    rendered = re.sub(r'\{\{/if\}\}', '', rendered)
+    
+    return rendered
+
+def send_email(settings: "SettingParams", to_email: str, subject: str, html_body: str) -> bool:
+    """
+    Отправляет email сообщение по SMTP с SSL.
+    
+    Args:
+        settings (SettingParams): Настройки с параметрами SMTP
+        to_email (str): Email получателя
+        subject (str): Тема письма
+        html_body (str): HTML-содержимое письма
+        
+    Returns:
+        bool: True если отправка успешна, False в противном случае
+    """
+    if not all([settings.smtp_server, settings.smtp_port, settings.smtp_login, settings.smtp_password]):
+        logger.error("Не заданы параметры SMTP сервера в файле .env")
+        return False
+    
+    try:
+        # Создаем сообщение
+        msg = MIMEMultipart('alternative')
+        msg['From'] = settings.smtp_from_email if hasattr(settings, 'smtp_from_email') else settings.smtp_login
+        msg['To'] = to_email
+        msg['Subject'] = Header(subject, 'utf-8')
+        
+        # Добавляем HTML часть
+        html_part = MIMEText(html_body, 'html', 'utf-8')
+        msg.attach(html_part)
+        
+        # Подключаемся к SMTP серверу через SSL
+        logger.debug(f"Подключение к SMTP серверу {settings.smtp_server}:{settings.smtp_port}")
+        with smtplib.SMTP_SSL(settings.smtp_server, settings.smtp_port, timeout=SMTP_TIMEOUT) as server:
+            # Аутентификация
+            logger.debug(f"Аутентификация как {settings.smtp_login}")
+            server.login(settings.smtp_login, settings.smtp_password)
+            
+            # Отправка письма
+            logger.debug(f"Отправка письма на {to_email}")
+            server.send_message(msg)
+            
+        logger.info(f"Email успешно отправлен на адрес {to_email}")
+        return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"Ошибка аутентификации SMTP: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"Ошибка SMTP при отправке email на {to_email}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при отправке email на {to_email}: {type(e).__name__}: {e}")
+        return False
+
+def send_welcome_email(settings: "SettingParams", user_data: dict) -> bool:
+    """
+    Отправляет приветственное письмо новому пользователю.
+    
+    Args:
+        settings (SettingParams): Настройки приложения
+        user_data (dict): Данные пользователя
+        
+    Returns:
+        bool: True если отправка успешна, False в противном случае
+    """
+    personal_email = user_data.get('personal_email', '').strip()
+    
+    if not personal_email:
+        logger.warning(f"Не указан personal_email для пользователя {user_data.get('login', 'unknown')}. Письмо не будет отправлено.")
+        return False
+    
+    # Загружаем шаблон
+    template = load_email_template(EMAIL_TEMPLATE_FILE)
+    if not template:
+        logger.error("Не удалось загрузить шаблон email. Письмо не будет отправлено.")
+        return False
+    
+    # Заполняем шаблон данными пользователя
+    html_body = render_email_template(template, user_data, settings)
+    
+    # Формируем тему письма
+    subject = f"Добро пожаловать в Yandex 360! Ваш логин: {user_data.get('login', '')}"
+    
+    # Отправляем письмо
+    return send_email(settings, personal_email, subject, html_body)
+
+def send_password_change_email(settings: "SettingParams", user_data: dict) -> bool:
+    """
+    Отправляет письмо об изменении пароля пользователю.
+    
+    Args:
+        settings (SettingParams): Настройки приложения
+        user_data (dict): Данные пользователя (должен содержать personal_email в формате JSON в поле about)
+        
+    Returns:
+        bool: True если отправка успешна, False в противном случае
+    """
+    # Извлекаем personal_email из поля about (JSON)
+    personal_email = user_data.get('personal_email', '').strip()
+    
+    if not personal_email:
+        logger.warning(f"Не указан personal_email для пользователя {user_data.get('login', 'unknown')}. Письмо не будет отправлено.")
+        return False
+    
+    # Загружаем шаблон
+    template = load_email_template(PASSWORD_CHANGE_TEMPLATE_FILE)
+    if not template:
+        logger.error("Не удалось загрузить шаблон email для изменения пароля. Письмо не будет отправлено.")
+        return False
+    
+    # Заполняем шаблон данными пользователя
+    html_body = render_email_template(template, user_data, settings)
+    
+    # Формируем тему письма
+    subject = f"Изменение пароля в Yandex 360"
+    
+    # Отправляем письмо
+    return send_email(settings, personal_email, subject, html_body)
+
+def find_user_by_login(settings: "SettingParams", login: str) -> Tuple[bool, dict]:
+    """
+    Находит пользователя по логину (nickname или alias).
+    
+    Args:
+        settings (SettingParams): Настройки приложения
+        login (str): Логин для поиска
+        
+    Returns:
+        Tuple[bool, dict]: (найден ли пользователь, объект пользователя или None)
+    """
+    login = login.lower().strip()
+    if '@' in login:
+        login = login.split('@')[0]
+    
+    users = get_all_api360_users(settings, force=True)
+    
+    for user in users:
+        # Проверяем nickname
+        if user['nickname'].lower() == login:
+            logger.debug(f"Пользователь найден по nickname: {user['nickname']} (ID: {user['id']})")
+            return True, user
+        
+        # Проверяем aliases
+        aliases_lower = [a.lower() for a in user.get('aliases', [])]
+        if login in aliases_lower:
+            logger.debug(f"Пользователь найден по alias: {user['nickname']} (ID: {user['id']})")
+            return True, user
+    
+    logger.warning(f"Пользователь с логином '{login}' не найден")
+    return False, None
 
 def remove_quotes_if_wrapped(text: str) -> str:
     """
@@ -957,6 +1701,15 @@ class SettingParams:
     password_pattern : str
     deps_file : str
     all_users_file : str
+    smtp_server : str
+    smtp_port : int
+    smtp_login : str
+    smtp_password : str
+    smtp_from_email : str
+    email_domain : str
+    send_welcome_email : bool
+    auto_generate_password : bool
+    generated_password_length : int
 
 def get_settings():
     exit_flag = False
@@ -971,6 +1724,15 @@ def get_settings():
         password_pattern = os.environ.get("PASSWORD_PATTERN"),
         deps_file = os.environ.get("DEPS_FILE","deps.csv"),
         all_users_file = os.environ.get("ALL_USERS_FILE","all_users.csv"),
+        smtp_server = os.environ.get("SMTP_SERVER", ""),
+        smtp_port = int(os.environ.get("SMTP_PORT", "465")),
+        smtp_login = os.environ.get("SMTP_LOGIN", ""),
+        smtp_password = os.environ.get("SMTP_PASSWORD", ""),
+        smtp_from_email = os.environ.get("SMTP_FROM_EMAIL", ""),
+        email_domain = os.environ.get("EMAIL_DOMAIN", ""),
+        send_welcome_email = os.environ.get("SEND_WELCOME_EMAIL", "false").lower() == "true",
+        auto_generate_password = os.environ.get("AUTO_GENERATE_PASSWORD", "false").lower() == "true",
+        generated_password_length = int(os.environ.get("GENERATED_PASSWORD_LENGTH", "12")),
     )
 
     if not settings.users_file:
@@ -1785,15 +2547,16 @@ def main_menu(settings: "SettingParams"):
         print("\n")
         print("Выберите опцию:")
         print("1. Добавить пользователей из файла.")
-        print("2. Анализировать входной файл на ошибки.")
-        print("3. Поиск подразделения по названию или алиасу.")
-        print("4. Показать атрибуты пользователя.")
-        print("5. Выгрузить всех пользователей в файл.")
+        print("2. Обновить сотрудников из файла.")
+        print("3. Анализировать входной файл на ошибки.")
+        print("4. Поиск подразделения по названию или алиасу.")
+        print("5. Показать атрибуты пользователя.")
+        print("6. Выгрузить всех пользователей в файл.")
         # print("3. Delete all contacts.")
         # print("4. Output bad records to file")
         print("0. (Ctrl+C) Выход")
         print("\n")
-        choice = input("Введите ваш выбор (0-5): ")
+        choice = input("Введите ваш выбор (0-6): ")
 
         if choice == "0":
             print("До свидания!")
@@ -1803,12 +2566,15 @@ def main_menu(settings: "SettingParams"):
             add_users_from_file(settings)
         elif choice == "2":
             print('\n')
-            add_users_from_file(settings, analyze_only=True )
+            update_users_from_file(settings)
         elif choice == "3":
-            search_department_prompt(settings)
+            print('\n')
+            add_users_from_file(settings, analyze_only=True )
         elif choice == "4":
-            show_user_attributes_prompt(settings)
+            search_department_prompt(settings)
         elif choice == "5":
+            show_user_attributes_prompt(settings)
+        elif choice == "6":
             download_users_attrib_to_file(settings)
         # elif choice == "4":
         #     analyze_data = add_contacts_from_file(True)
