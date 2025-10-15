@@ -34,13 +34,14 @@ DEFAULT_PASSWORD_PATTERN = r'^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\
 # DEFAULT_EMAIL_PATTERN is used to validate the personal email
 DEFAULT_EMAIL_PATTERN = r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?@[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$'
 
-USERS_CSV_REQUIRED_HEADERS = ["login", "password", "password_change_required", "first_name", "last_name", "middle_name", "position", "gender", "birthday", "language", "work_phone", "mobile_phone", "personal_email", "department"]
+USERS_CSV_REQUIRED_HEADERS = ["login", "password", "password_change_required", "first_name", "last_name", "middle_name", "position", "gender", "birthday", "language", "work_phone", "mobile_phone", "personal_email", "department", "is_enabled", "is_admin", "aliases", "update_password"]
 
 # MAX value is 1000
 USERS_PER_PAGE_FROM_API = 1000
 DEPARTMENTS_PER_PAGE_FROM_API = 100
 
 DEPS_SEPARATOR = '|'
+CLEAR_FIELD_VALUE = '-'
 
 EXIT_CODE = 1
 
@@ -96,7 +97,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                     logger.error(f'Ошибка! Заголовок {header} не соответствует требуемым: {";".join(USERS_CSV_REQUIRED_HEADERS)}')
                     bad_header = True
             if bad_header:
-                return
+                return False, []
             logger.debug(f'Headers: {headers}')
             for line in csvfile:
                 if line.startswith('#'):
@@ -106,9 +107,9 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 logger.debug(f'Чтение строки из файла - {mask_csv_line_safe(line)}')
                 #fields = line.replace('"','').split(";")
                 fields = line.split(";")
-                if len(fields) != len(USERS_CSV_REQUIRED_HEADERS):
-                    logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует требуемым заголовкам: {USERS_CSV_REQUIRED_HEADERS}. Возможно, в значении какого-либо поля есть точка с запятой. Попробуйте заменить её на другой символ.')
-                    return
+                if len(fields) != len(headers):
+                    logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует количеству заголовков в первой строке файла. Возможно, в значении какого-либо поля есть точка с запятой. Попробуйте заменить её на другой символ.')
+                    return False, []
                 entry = {}
                 for i,value in enumerate(fields):
                     # Удаляем кавычки только если они обрамляют всю строку
@@ -119,6 +120,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
         logger.info("\n")
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return False, []
 
     correct_lines = []
     error_lines = []
@@ -131,6 +133,15 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
     logger.info('Проверка корректности данных.')
     logger.info("-" *100)
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
+
+    if not analyze_only:
+        check_aliases_uniqueness_result, check_aliases_uniqueness_errors = check_aliases_uniqueness(data, mode="add")
+    else:
+        check_aliases_uniqueness_result, check_aliases_uniqueness_errors = check_aliases_uniqueness(data, mode="modify")
+    if not check_aliases_uniqueness_result:
+        logger.error('Некоторые алиасы не уникальны. Обновление отменено.')
+        return False, []
+
     for element in data:
         entry = {}
         correct = True
@@ -148,26 +159,27 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                         correct = False
                         logger.error(f'Строка #{line_number}. Возможный некорректный логин _"{temp_login}"_')
                     else:
-                        for conflict in conflicts:
-                            logger.error(f'Строка #{line_number}. Конфликт логина _"{temp_login}"_ с существующем пользователем {conflict["nickname"]} ({conflict["name"]["last"]} {conflict["name"]["first"]}). Добавление пользователя отменено.')
-                        stop_adding = True
+                        if not analyze_only:
+                            for conflict in conflicts:
+                                logger.error(f'Строка #{line_number}. Конфликт логина _"{temp_login}"_ с существующем пользователем {conflict["nickname"]} ({conflict["name"]["last"]} {conflict["name"]["first"]}). Добавление пользователя отменено.')
+                            stop_adding = True
                 else:
                     entry["login"] = temp_login
             else:
                 stop_adding = True
                 logger.error(f'Строка #{line_number}. Логин пуст. Отмена добавления пользователя.')
 
-            temp_firest_name = element["first_name"]
-            if temp_firest_name:
-                if not validate_name(temp_firest_name):
+            temp_first_name = element.get("first_name","")
+            if temp_first_name:
+                if not validate_name(temp_first_name):
                     correct = False
-                    logger.warning(f'Строка #{line_number}. Возможный некорректное Имя пользвоателя _"{temp_firest_name}"_')
-                entry["first"] = temp_firest_name
+                    logger.warning(f'Строка #{line_number}. Возможный некорректное Имя пользвоателя _"{temp_first_name}"_')
+                entry["first"] = temp_first_name
             else:
                 stop_adding = True
                 logger.error(f'Строка #{line_number}. Имя пользвоателя пусто. Отмена добавления пользователя.')
 
-            temp_last_name = element["last_name"]
+            temp_last_name = element.get("last_name","")
             if temp_last_name:
                 if not validate_name(temp_last_name):
                     correct = False
@@ -177,14 +189,14 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 stop_adding = True
                 logger.error(f'Строка #{line_number}. Фамилия пользвоателя пуста. Отмена добавления пользователя.')
 
-            temp_middle_name = element["middle_name"]
+            temp_middle_name = element.get("middle_name","")
             if temp_middle_name:
                 if not validate_name(temp_middle_name):
                     correct = False
                     logger.warning(f'Строка #{line_number}. Возможная некорректное отчество пользвоателя _"{temp_middle_name}"_')
             entry["middle"] = temp_middle_name
 
-            temp_password = element["password"]
+            temp_password = element.get("password","")
             if temp_password:
                 # Проверяем пароль с помощью регулярного выражения
                 password_valid, password_message = validate_password(settings, temp_password)
@@ -201,30 +213,30 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                     entry["password"] = generated_password
                 else:
                     stop_adding = True
-                    logger.error(f'Строка #{line_number}. Пароль пуст. Отмена добавления пользователя.')
+                    logger.error(f'Строка #{line_number}. Пароль пуст. Функция автогенерации пароля отключена в настройках. Отмена добавления пользователя.')
 
-            password_change_required = element["password_change_required"].lower()
+            password_change_required = element.get("password_change_required","").lower()
             if password_change_required not in ['true', 'false']:
                 stop_adding = True
                 logger.error(f'Строка #{line_number}. Неккорректный параметр password_change_required _"{password_change_required}"_. Должно быть true или false. Отмена добавления пользователя.')
             else:
                 entry["password_change_required"] = password_change_required
 
-            temp_language = element["language"].lower()
-            if temp_language not in ['ru', 'en']:
+            temp_language = element.get("language","").lower()
+            if temp_language and temp_language not in ['ru', 'en']:
                 #stop_adding = True
                 logger.error(f'Строка #{line_number}. Некорректный язык _"{temp_language}"_. Должно быть ru или en. Будет записано пустое значение.')
             else:
                 entry["language"] = temp_language
 
-            temp_gender = element["gender"].lower()
-            if temp_gender not in ['male', 'female']:
+            temp_gender = element.get("gender","").lower()
+            if temp_gender and temp_gender not in ['male', 'female']:
                 #stop_adding = True
                 logger.error(f'Строка #{line_number}. Некорректный пол _"{temp_gender}"_. Должно быть male или female. Будет записано пустое значение.')
             else:
                 entry["gender"] = temp_gender   
 
-            temp_birthday = element["birthday"]
+            temp_birthday = element.get("birthday","")
             if temp_birthday:
                 check_date, date_value = is_valid_date(temp_birthday)
                 if not check_date:
@@ -233,13 +245,37 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 else:
                     entry["birthday"] = date_value.strftime('%Y-%m-%d')
 
-            entry["position"] = element["position"]
+            entry["position"] = element.get("position","")
+
+            temp_is_enabled = element.get("is_enabled", "true").lower()
+            if temp_is_enabled and temp_is_enabled == 'false':
+                logger.info(f'Строка #{line_number}, login {element["position"]}. Установлено False в значении поля is_enabled. При создании пользователя данное поле игнорируется, пользователь будет создан в статусе Enabled.')
+            # if temp_is_enabled and temp_is_enabled not in ['true', 'false']:
+            #     logger.error(f'Строка #{line_number}. Некорректный параметр is_enabled _"{temp_is_enabled}"_. Должно быть true или false. Будет использовано значение true.')
+            #     entry["is_enabled"] = True
+            # else:
+            #     entry["is_enabled"] = temp_is_enabled
+
+            temp_is_admin = element.get("is_admin", "false").lower()
+            if temp_is_admin and temp_is_admin not in ['true', 'false']:
+                logger.error(f'Строка #{line_number}. Некорректный параметр is_admin _"{temp_is_admin}"_. Должно быть true или false. Будет использовано значение false')
+                entry["is_admin"] = False
+            else:
+                entry["is_admin"] = temp_is_admin
+
+            temp_aliases = element.get("aliases", "").split(",")
+            if temp_aliases:
+                for alias in temp_aliases:
+                    if not validate_alias(settings, alias.split("@")[0].lower().strip()):
+                        stop_adding = True
+                        logger.error(f'Строка #{line_number}. Некорректный алиас _"{alias}"_. Отмена добавления пользователя.')
+                entry["aliases"] = temp_aliases
 
             found_dep = False
-            if len(element["department"]) == 0:
+            if len(element.get("department","")) == 0:
                 entry["department"] = "1"
             else:
-                entry["department"] = element["department"]
+                entry["department"] = element.get("department","")
                 if entry["department"].isdigit():
                     if int(entry["department"]) > 1:
                         for dep in api_deps_hierarchy:
@@ -250,7 +286,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                             stop_adding = True
                             logger.error(f'Строка #{line_number}. Подразделение с номером {entry["department"]} не найдено в организации. Отмена добавления пользователя.')
 
-            temp_work_phone = element["work_phone"]
+            temp_work_phone = element.get("work_phone","")
             if temp_work_phone:
                 check_phone, phone_value = validate_phone_number(temp_work_phone)
                 if not check_phone:
@@ -259,7 +295,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 else:
                     entry["work_phone"] = phone_value
 
-            temp_mobile_phone = element["mobile_phone"]
+            temp_mobile_phone = element.get("mobile_phone","")
             if temp_mobile_phone:
                 check_phone, phone_value = validate_phone_number(temp_mobile_phone)
                 if not check_phone:
@@ -268,7 +304,7 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
                 else:
                     entry["mobile_phone"] = phone_value
 
-            temp_personal_email = element["personal_email"]
+            temp_personal_email = element.get("personal_email","")
             if temp_personal_email:
                 check_email, email_value = validate_email(temp_personal_email)
                 if not check_email:
@@ -350,7 +386,10 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
         user["language"] = u.get('language')
         user["gender"] = u.get('gender')
         user["birthday"] = u.get('birthday')
-        user["isAdmin"] = False
+        if u.get('is_admin'):
+            user["isAdmin"] = u.get('is_admin')
+        if u.get('is_enabled'):
+            user["isEnabled"] = u.get('is_enabled')
         user["contacts"] = []
         if u.get('work_phone',''):
             user["contacts"].append({
@@ -366,7 +405,7 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
             })
         
         if u.get('personal_email',''):
-            user["about"] = json.dumps({"email": u.get('personal_email')})
+            user["about"] = json.dumps({"personal_email": u.get('personal_email')})
 
         if u["department"].isdigit():
             user["departmentId"] = u['department']
@@ -385,6 +424,10 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
                     "department": u['department']
                 }
                 added_users.append(temp_dict)
+                if len(u.get('aliases', [])) > 0:
+                    for alias in u.get('aliases', []):
+                        if alias:
+                            create_user_alias_by_api(settings, user_id=user["id"], alias=alias.split("@")[0].lower().strip())
                 
                 # Отправка приветственного письма
                 if settings.send_welcome_email:
@@ -511,13 +554,16 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                 
                 logger.debug(f'Чтение строки из файла - {mask_csv_line_safe(line)}')
                 fields = line.split(";")
-                if len(fields) != len(USERS_CSV_REQUIRED_HEADERS):
-                    logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует требуемым заголовкам: {USERS_CSV_REQUIRED_HEADERS}.')
+                if len(fields) != len(headers):
+                    logger.error(f'Ошибка! Строка {mask_csv_line_safe(line)} - количество полей не соответствует количеству заголовков в первой строке файла. Возможно, в значении какого-либо поля есть точка с запятой. Попробуйте заменить её на другой символ.')
                     return False, []
                 entry = {}
                 for i,value in enumerate(fields):
                     value = remove_quotes_if_wrapped(value)
-                    entry[headers[i].strip()] = value.strip()
+                    if value.strip() == CLEAR_FIELD_VALUE:
+                        entry[headers[i].strip()] = ' '
+                    else:
+                        entry[headers[i].strip()] = value.strip()
                 data.append(entry)
         logger.info(f'Конец чтения файла {users_file_name}')
         logger.info("\n")
@@ -533,7 +579,12 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
     logger.info('Проверка корректности данных для обновления.')
     logger.info("-" *100)
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
-    
+
+    check_aliases_uniqueness_result, check_aliases_uniqueness_errors = check_aliases_uniqueness(data, mode="update")
+    if not check_aliases_uniqueness_result:
+        logger.error('Некоторые алиасы не уникальны. Обновление отменено.')
+        return False, []
+
     for element in data:
         entry = {}
         stop_updating = False
@@ -551,6 +602,8 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                 found, existing_user = find_user_by_login(settings, temp_login)
                 if not found:
                     logger.error(f'Строка #{line_number}. Пользователь с логином "{temp_login}" не найден в системе. Обновление отменено.')
+                    if element not in error_lines:
+                        error_lines.append(element)
                     stop_updating = True
                 else:
                     entry["login"] = temp_login
@@ -558,101 +611,171 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                     entry["existing_user"] = existing_user
                     logger.info(f'Строка #{line_number}. Найден пользователь: {existing_user["nickname"]} (ID: {existing_user["id"]})')
             else:
-                stop_updating = True
                 logger.error(f'Строка #{line_number}. Логин пуст. Отмена обновления пользователя.')
+                if element not in error_lines:
+                    error_lines.append(element)
+                stop_updating = True
 
             if stop_updating:
-                error_lines.append(element)
                 continue
 
             # Имя
-            temp_first_name = element["first_name"]
-            if temp_first_name:
-                if not validate_name(temp_first_name):
-                    logger.warning(f'Строка #{line_number}. Возможное некорректное имя пользователя _"{temp_first_name}"_')
-                entry["first"] = temp_first_name
+            entry["first"] = element.get("first_name",'')
+            if entry["first"] and entry["first"].strip():
+                if not validate_name(entry["first"]):
+                    logger.warning(f'Строка #{line_number}. Возможное некорректное имя пользователя _"{entry["first"]}"_')
+            elif entry["first"] and not entry["first"].strip():
+                logger.error(f'Строка #{line_number}. Очистить параметр first нельзя. Нужно указать имя.')
+                if element not in error_lines:
+                    error_lines.append(element)
+                    stop_updating = True
             # Если пустое - не обновляем
 
             # Фамилия
-            temp_last_name = element["last_name"]
-            if temp_last_name:
-                if not validate_name(temp_last_name):
-                    logger.warning(f'Строка #{line_number}. Возможная некорректная фамилия пользователя _"{temp_last_name}"_')
-                entry["last"] = temp_last_name
-
+            entry["last"] = element.get("last_name",'')
+            if entry["last"] and entry["last"].strip():
+                if not validate_name(entry["last"]):
+                    logger.warning(f'Строка #{line_number}. Возможная некорректная фамилия пользователя _"{entry["last"]}"_')
+            elif entry["last"] and not entry["last"].strip():
+                logger.error(f'Строка #{line_number}. Очистить параметр last нельзя. Нужно указать фамилию.')
+                if element not in error_lines:
+                    error_lines.append(element)
+                    stop_updating = True
             # Отчество
-            temp_middle_name = element["middle_name"]
-            if temp_middle_name:
-                if not validate_name(temp_middle_name):
-                    logger.warning(f'Строка #{line_number}. Возможное некорректное отчество пользователя _"{temp_middle_name}"_')
-                entry["middle"] = temp_middle_name
+            entry["middle"] = element.get("middle_name",'')
+            if entry["middle"] and entry["middle"].strip():
+                if not validate_name(entry["middle"]):
+                    logger.warning(f'Строка #{line_number}. Возможное некорректное отчество пользователя _"{entry["middle"]}"_')
 
             # Обработка пароля
-            temp_password = element["password"]
-            password_change_required = element["password_change_required"].lower()
+            temp_password = element.get("password",'').strip()
+            password_change_required = element.get("password_change_required","").lower()
             
             if password_change_required not in ['true', 'false', '']:
                 logger.error(f'Строка #{line_number}. Некорректный параметр password_change_required _"{password_change_required}"_. Должно быть true, false или пусто.')
-                error_lines.append(element)
-                continue
-            
-            # Если password_change_required = true и password пустой - генерируем новый пароль
-            if password_change_required == 'true' and not temp_password:
-                if settings.auto_generate_password:
-                    generated_password = generate_temp_password(settings.generated_password_length)
-                    logger.info(f'Строка #{line_number}. Пароль будет сгенерирован автоматически (длина {len(generated_password)} символов).')
-                    entry["password"] = generated_password
-                    entry["password_was_generated"] = True
-                else:
-                    logger.error(f'Строка #{line_number}. Требуется изменение пароля, но пароль не указан и автогенерация отключена.')
+                if element not in error_lines:
                     error_lines.append(element)
-                    continue
-            elif temp_password:
-                # Если пароль указан, проверяем его
-                password_valid, password_message = validate_password(settings, temp_password)
-                if not password_valid:
-                    logger.error(f'Строка #{line_number}. Некорректный пароль: {password_message}')
-                    error_lines.append(element)
-                    continue
-                else:
-                    entry["password"] = temp_password
-                    entry["password_was_generated"] = False
+                stop_updating = True
             
-            if password_change_required:
-                entry["password_change_required"] = password_change_required
+            entry["update_password"] = element.get("update_password",'').lower()
+            if entry["update_password"] not in ['true', 'false']:
+                entry["update_password"] = 'false'
+                logger.error(f'Строка #{line_number}. Неккорректный параметр update_password _"{entry["update_password"]}"_. Должно быть true или false. Параметр будет записан как false.')
 
-            # Язык
-            temp_language = element["language"].lower()
-            if temp_language:
-                if temp_language not in ['ru', 'en']:
-                    logger.error(f'Строка #{line_number}. Некорректный язык _"{temp_language}"_. Должно быть ru или en.')
+            if entry["update_password"] == 'true':
+            # Если password_change_required = true и password пустой - генерируем новый пароль
+                if password_change_required == 'true' and not temp_password.strip():
+                    if settings.auto_generate_password:
+                        generated_password = generate_temp_password(settings.generated_password_length)
+                        logger.info(f'Строка #{line_number}. Пароль будет сгенерирован автоматически (длина {len(generated_password)} символов).')
+                        entry["password"] = generated_password
+                        entry["password_was_generated"] = True
+                    else:
+                        logger.error(f'Строка #{line_number}. Требуется изменение пароля, но пароль не указан и автогенерация отключена.')
+                        if element not in error_lines:
+                            error_lines.append(element)
+                        stop_updating = True
+                elif temp_password:
+                    # Если пароль указан, проверяем его
+                    password_valid, password_message = validate_password(settings, temp_password)
+                    if not password_valid:
+                        logger.error(f'Строка #{line_number}. Некорректный пароль: {password_message}')
+                        if element not in error_lines:
+                            error_lines.append(element)
+                        stop_updating = True
+                    else:
+                        entry["password"] = temp_password
+                        entry["password_was_generated"] = False
+                
+                if password_change_required:
+                    entry["password_change_required"] = password_change_required
                 else:
-                    entry["language"] = temp_language
+                    logger.error(f'Строка #{line_number}. Требуется изменение пароля, но не указан параметр password_change_required.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
+            else:
+                if temp_password:
+                    logger.error(f'Строка #{line_number}. Login - "{temp_login}". Пароль указан, но update_password = false. Пароль не будет изменен.')
+            
+            # Язык
+            entry["language"] = element.get("language",'').lower()
+            if entry["language"] and entry["language"].strip():
+                if entry["language"] not in ['ru', 'en']:
+                    logger.error(f'Строка #{line_number}. Некорректный язык _"{entry["language"]}"_. Должно быть ru или en.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
+            elif entry["language"] and not entry["language"].strip():
+                logger.error(f'Строка #{line_number}. Очистить параметр language после создания пользователя нельзя. Нужно указать ru или en.') 
+                if element not in error_lines:
+                    error_lines.append(element)
+                stop_updating = True
 
             # Пол
-            temp_gender = element["gender"].lower()
-            if temp_gender:
-                if temp_gender not in ['male', 'female']:
-                    logger.error(f'Строка #{line_number}. Некорректный пол _"{temp_gender}"_. Должно быть male или female.')
-                else:
-                    entry["gender"] = temp_gender
+            entry["gender"] = element.get("gender",'').lower()
+            if entry["gender"] and entry["gender"].strip():
+                if entry["gender"] not in ['male', 'female']:
+                    logger.error(f'Строка #{line_number}. Некорректный пол _"{entry["gender"]}"_. Должно быть male или female.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
 
             # Дата рождения
-            temp_birthday = element["birthday"]
-            if temp_birthday:
-                check_date, date_value = is_valid_date(temp_birthday)
+            entry["birthday"] = element.get("birthday",'')
+            if entry["birthday"] and entry["birthday"].strip():
+                check_date, date_value = is_valid_date(entry["birthday"])
                 if not check_date:
-                    logger.error(f'Строка #{line_number}. Некорректная дата рождения _"{temp_birthday}"_ ({date_value}).')
+                    logger.error(f'Строка #{line_number}. Некорректная дата рождения _"{entry["birthday"]}"_ ({date_value}).')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
                 else:
                     entry["birthday"] = date_value.strftime('%Y-%m-%d')
 
             # Должность
-            if element["position"]:
-                entry["position"] = element["position"]
+            entry["position"] = element.get("position",'')
+
+            entry["is_enabled"] = element.get("is_enabled", "").lower()
+            if entry["is_enabled"] and entry["is_enabled"].strip():
+                if entry["is_enabled"] not in ['true', 'false']:
+                    logger.error(f'Строка #{line_number}. Некорректный параметр is_enabled _"{entry["is_enabled"]}"_. Должно быть true или false.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
+            elif entry["is_enabled"] and not entry["is_enabled"].strip():
+                logger.error(f'Строка #{line_number}. Очистить параметр is_enabled нельзя. Нужно указать true или false.')
+
+            entry["is_admin"] = element.get("is_admin", "").lower()
+            if entry["is_admin"] and entry["is_admin"].strip():
+                if entry["is_admin"] not in ['true', 'false']:
+                    logger.error(f'Строка #{line_number}. Некорректный параметр is_admin _"{entry["is_admin"]}"_. Должно быть true или false.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
+            elif entry["is_admin"] and not entry["is_admin"].strip():
+                logger.error(f'Строка #{line_number}. Очистить параметр is_admin нельзя. Нужно указать true или false.')
+
+
+            temp_aliases = element.get("aliases", "")
+            entry['raw_aliases'] = temp_aliases
+            entry["aliases"] = []
+            if temp_aliases and temp_aliases.strip():
+                bad_aliases = False
+                for alias in temp_aliases.split(","):
+                    if not validate_alias(settings, alias.split("@")[0].lower().strip()):
+                        bad_aliases = True
+                        logger.error(f'Строка #{line_number}. Некорректный алиас _"{alias}"_. Отмена добавления пользователя.')
+                    else:
+                        entry["aliases"].append(alias.split("@")[0].lower().strip())
+                if bad_aliases:
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
 
             # Подразделение
-            if element["department"]:
-                entry["department"] = element["department"]
+            entry["department"] = element.get("department",'')
+            if entry["department"] and entry["department"].strip():
                 if entry["department"].isdigit():
                     if int(entry["department"]) > 1:
                         found_dep = False
@@ -662,39 +785,51 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                                 break
                         if not found_dep:
                             logger.error(f'Строка #{line_number}. Подразделение с номером {entry["department"]} не найдено в организации.')
+                            if element not in error_lines:
+                                error_lines.append(element)
+                            stop_updating = True
 
             # Рабочий телефон
-            temp_work_phone = element["work_phone"]
-            if temp_work_phone:
-                check_phone, phone_value = validate_phone_number(temp_work_phone)
+            entry["work_phone"] = element.get("work_phone",'')
+            if entry["work_phone"] and entry["work_phone"].strip():
+                check_phone, phone_value = validate_phone_number(entry["work_phone"])
                 if not check_phone:
-                    logger.error(f'Строка #{line_number}. Некорректный рабочий телефон _"{temp_work_phone}"_.')
+                    logger.error(f'Строка #{line_number}. Некорректный рабочий телефон _"{entry["work_phone"]}"_.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
                 else:
                     entry["work_phone"] = phone_value
 
             # Мобильный телефон
-            temp_mobile_phone = element["mobile_phone"]
-            if temp_mobile_phone:
-                check_phone, phone_value = validate_phone_number(temp_mobile_phone)
+            entry["mobile_phone"] = element.get("mobile_phone",'')
+            if entry["mobile_phone"] and entry["mobile_phone"].strip():
+                check_phone, phone_value = validate_phone_number(entry["mobile_phone"])
                 if not check_phone:
-                    logger.error(f'Строка #{line_number}. Некорректный мобильный телефон _"{temp_mobile_phone}"_.')
+                    logger.error(f'Строка #{line_number}. Некорректный мобильный телефон _"{entry["mobile_phone"]}"_.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
                 else:
                     entry["mobile_phone"] = phone_value
 
             # Личный email
-            temp_personal_email = element["personal_email"]
-            if temp_personal_email:
-                check_email, email_value = validate_email(temp_personal_email)
+            entry["personal_email"] = element.get("personal_email",'')
+            if entry["personal_email"] and entry["personal_email"].strip():
+                check_email, email_value = validate_email(entry["personal_email"])
                 if not check_email:
-                    logger.error(f'Строка #{line_number}. Некорректный личный email _"{temp_personal_email}"_.')
-                else:
-                    entry["personal_email"] = temp_personal_email
+                    logger.error(f'Строка #{line_number}. Некорректный личный email _"{entry["personal_email"]}"_.')
+                    if element not in error_lines:
+                        error_lines.append(element)
+                    stop_updating = True
 
-            correct_lines.append(entry)
+            if not stop_updating:
+                correct_lines.append(entry)
 
         except Exception as e:
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
-            error_lines.append(element)
+            if element not in error_lines:
+                error_lines.append(element)
 
         logger.debug("." * 100)
 
@@ -726,6 +861,8 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
     logger.info("-" * 100)
     
     updated_users = []
+    # Часть атрибутов, нельзя изменить, если пользователь заблокирован в 360. Для них будем записывать в этот список и потом обновлять отдельным процессом 
+    change_for_disabled_users = []
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
     
     for u in users:
@@ -738,93 +875,168 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
             logger.info(f"Обработка пользователя: {u.get('login')} (ID: {user_id})")
             
             # Проверяем изменения в имени
+            changes['name'] = {}
             if u.get('first') and existing_user['name'].get('first') != u.get('first'):
-                if 'name' not in changes:
-                    changes['name'] = {}
-                changes['name']['first'] = u.get('first')
+                changes['name']['first'] = u.get('first').strip()
                 logger.debug(f"  Изменение имени: {existing_user['name'].get('first')} -> {u.get('first')}")
             
             if u.get('last') and existing_user['name'].get('last') != u.get('last'):
-                if 'name' not in changes:
-                    changes['name'] = {}
-                changes['name']['last'] = u.get('last')
+                changes['name']['last'] = u.get('last').strip()
                 logger.debug(f"  Изменение фамилии: {existing_user['name'].get('last')} -> {u.get('last')}")
             
             if u.get('middle') and existing_user['name'].get('middle') != u.get('middle'):
-                if 'name' not in changes:
-                    changes['name'] = {}
-                changes['name']['middle'] = u.get('middle')
+                changes['name']['middle'] = u.get('middle').strip()
                 logger.debug(f"  Изменение отчества: {existing_user['name'].get('middle')} -> {u.get('middle')}")
+
+            if not changes['name']:
+                del changes['name']
+            else:
+                if 'first' not in changes['name']:
+                    changes['name']['first'] = existing_user['name'].get('first')
+                if 'last' not in changes['name']:
+                    changes['name']['last'] = existing_user['name'].get('last')
+                if 'middle' not in changes['name']:
+                    changes['name']['middle'] = existing_user['name'].get('middle')
             
             # Проверяем изменение пароля
-            if u.get('password'):
-                changes['password'] = u.get('password')
-                password_changed = True
-                logger.debug("  Изменение пароля")
-            
-            if u.get('password_change_required'):
-                changes['passwordChangeRequired'] = u.get('password_change_required')
-                logger.debug(f"  Установка passwordChangeRequired: {u.get('password_change_required')}")
+            if u.get('update_password') and u.get('update_password') == 'true':
+                if u.get('password'):
+                    changes['password'] = u.get('password')
+                    password_changed = True
+                    logger.debug("  Изменение пароля")
+                
+                if u.get('password_change_required'):
+                    changes['passwordChangeRequired'] = u.get('password_change_required')
+                    logger.debug(f"  Установка passwordChangeRequired: {u.get('password_change_required')}")
             
             # Должность
             if u.get('position') and existing_user.get('position') != u.get('position'):
-                changes['position'] = u.get('position')
+                changes['position'] = u.get('position').strip()
                 logger.debug(f"  Изменение должности: {existing_user.get('position')} -> {u.get('position')}")
             
             # Язык
             if u.get('language') and existing_user.get('language') != u.get('language'):
-                changes['language'] = u.get('language')
-                logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
+                if existing_user.get('isEnabled') == 'false':
+                    temp_change = {
+                        'language': u.get('language').strip()
+                    }
+                    change_for_disabled_users.append({'user_id': user_id, 'changes': temp_change})
+                    logger.debug(f"  Язык нельзя изменить, пользователь {u.get('login')} заблокирован в 360. Откладываем процесс изменений.")
+                #changes['language'] = u.get('language').strip()
+                #logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
             
             # Пол
             if u.get('gender') and existing_user.get('gender') != u.get('gender'):
-                changes['gender'] = u.get('gender')
+                changes['gender'] = u.get('gender').strip()
                 logger.debug(f"  Изменение пола: {existing_user.get('gender')} -> {u.get('gender')}")
             
             # Дата рождения
             if u.get('birthday') and existing_user.get('birthday') != u.get('birthday'):
-                changes['birthday'] = u.get('birthday')
+                changes['birthday'] = u.get('birthday').strip()
                 logger.debug(f"  Изменение даты рождения: {existing_user.get('birthday')} -> {u.get('birthday')}")
+
+            if u.get('is_enabled') and u.get('is_enabled').strip():
+                if existing_user.get('isEnabled') != u.get('is_enabled'):
+                    changes['isEnabled'] = u.get('is_enabled').strip()
+                    logger.debug(f"  Изменение статуса пользователя: {existing_user.get('is_enabled')} -> {u.get('is_enabled')}")
+
+            if u.get('is_admin') and u.get('is_admin').strip():
+                if existing_user.get('isAdmin') != u.get('is_admin'):
+                    changes['isAdmin'] = u.get('is_admin').strip()
+                    logger.debug(f"  Изменение статуса администратора: {existing_user.get('is_admin')} -> {u.get('is_admin')}")
             
             # Обработка контактов (телефоны)
-            contacts_changed = False
             new_contacts = []
-            
+            update_contacts = False
+            found_mobile = False
+            found_work = False
             # Копируем существующие контакты, кроме телефонов (которые будем обновлять)
             for contact in existing_user.get('contacts', []):
-                if contact['type'] != 'phone':
-                    new_contacts.append(contact)
+                if not contact['synthetic']:
+                    if not contact['alias']:
+                        if contact['type'] == 'phone':
+                            label = contact['label'].lower()
+                            if label == 'mobile':
+                                if u.get('mobile_phone') and u.get('mobile_phone').strip():
+                                    if contact['value'] != u.get('mobile_phone'):
+                                        if u.get('mobile_phone').strip():
+                                            contact['value'] = u.get('mobile_phone').strip()
+                                            new_contacts.append(contact)
+                                            update_contacts = True
+                                            found_mobile = True
+                                    else:
+                                        new_contacts.append(contact)
+                                        found_mobile = True
+                                elif u.get('mobile_phone') and not u.get('mobile_phone').strip():
+                                    update_contacts = True
+                                    found_mobile = True
+                            elif label == 'work':
+                                if u.get('work_phone') and u.get('work_phone').strip():
+                                    if contact['value'] != u.get('work_phone'):
+                                        if u.get('work_phone').strip():
+                                            contact['value'] = u.get('work_phone').strip()
+                                            new_contacts.append(contact)
+                                            update_contacts = True
+                                            found_work = True
+                                    else:
+                                        new_contacts.append(contact)
+                                        found_work = True
+                                elif u.get('work_phone') and not u.get('work_phone').strip():
+                                    update_contacts = True
+                                    found_work = True
+                        else:   
+                            new_contacts.append(contact)
             
-            # Добавляем новые телефоны
-            if u.get('work_phone'):
-                new_contacts.append({
-                    "type": "phone",
-                    "value": u.get('work_phone'),
-                    'label': 'Work'
-                })
-                contacts_changed = True
-            
-            if u.get('mobile_phone'):
-                new_contacts.append({
-                    "type": "phone",
-                    "value": u.get('mobile_phone'),
-                    'label': 'Mobile'
-                })
-                contacts_changed = True
-            
-            if contacts_changed:
+            if not found_mobile:
+                if u.get('mobile_phone').strip():
+                    new_contacts.append({
+                        'value': u.get('mobile_phone').strip(),
+                        'label': 'mobile',
+                        'type': 'phone',
+                    })
+                    update_contacts = True
+                    found_mobile = True
+            if not found_work:
+                if u.get('work_phone').strip():
+                    new_contacts.append({
+                        'value': u.get('work_phone').strip(),
+                        'label': 'work',
+                        'type': 'phone',
+                    })
+                    update_contacts = True
+                    found_work = True
+            if new_contacts and update_contacts:
                 changes['contacts'] = new_contacts
-                logger.debug("  Обновление контактов")
+                logger.debug("Обновление контактов")
+ 
             
             # Обновление personal_email в поле about
             if u.get('personal_email'):
-                new_about = json.dumps({"email": u.get('personal_email')})
+                # Безопасно извлекаем about в словарь
+                about_dict = {}
+                existing_about = existing_user.get('about', '')
+                if existing_about:
+                    try:
+                        about_dict = json.loads(existing_about)
+                        if not isinstance(about_dict, dict):
+                            about_dict = {}
+                    except Exception:
+                        about_dict = {}
+                # Обновляем поле personal_email
+                if u.get('personal_email').strip():
+                    about_dict['personal_email'] = u.get('personal_email').strip()
+                else:
+                    del about_dict['personal_email']
+                if about_dict:
+                    new_about = json.dumps(about_dict, ensure_ascii=False)
+                else:
+                    new_about = ""
                 if existing_user.get('about') != new_about:
                     changes['about'] = new_about
                     logger.debug("  Обновление about (personal_email)")
             
             # Подразделение
-            if u.get('department'):
+            if u.get('department') and u.get('department').strip():
                 dep_id = None
                 if u['department'].isdigit():
                     dep_id = int(u['department'])
@@ -840,16 +1052,45 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                 if dep_id and existing_user.get('departmentId') != dep_id:
                     changes['departmentId'] = dep_id
                     logger.debug(f"  Изменение подразделения: {existing_user.get('departmentId')} -> {dep_id}")
+
+            elif u.get('department') and not u.get('department').strip():
+                changes['departmentId'] = 1
+
             
             # Если есть изменения - применяем их
-            if changes:
+            if changes or u['raw_aliases']:
                 if settings.dry_run:
                     logger.info(f"Пробный запуск. Пользователь {u.get('login')} не будет обновлен. Изменения: {mask_sensitive_data(changes)}")
                 else:
-                    result = patch_user_by_api(settings, user_id=user_id, patch_data=changes)
-                    if result:
-                        logger.info(f"Успех - пользователь {u.get('login')} обновлен.")
-                        updated_users.append(u)
+                    if changes:
+                        result = patch_user_by_api(settings, user_id=user_id, patch_data=changes)
+                        if result:
+                            logger.info(f"Успех - пользователь {u.get('login')} обновлен.")
+                            updated_users.append(u)
+                        else:
+                            logger.error(f"Ошибка при обновлении пользователя {u.get('login')}")
+                    if u['raw_aliases'] and u['raw_aliases'].strip():
+                        # Обработка алиасов
+                        new_aliases = u.get('aliases', [])
+                        old_aliases = existing_user.get('aliases', [])
+                        add_aliases = []
+                        remove_aliases = []
+                        for alias in new_aliases:
+                            if alias and alias.split("@")[0].lower().strip() not in old_aliases:
+                                add_aliases.append(alias.split("@")[0].lower().strip())
+                        for alias in old_aliases:
+                            if alias and alias.split("@")[0].lower().strip() not in new_aliases:
+                                remove_aliases.append(alias.split("@")[0].lower().strip())
+                        if add_aliases:
+                            for alias in add_aliases:
+                                create_user_alias_by_api(settings, existing_user["id"], alias)
+                        if remove_aliases:
+                            for alias in remove_aliases:
+                                delete_user_alias_by_api(settings, existing_user["id"], alias)
+                    elif u['raw_aliases'] and not u['raw_aliases'].strip():
+                        old_aliases = existing_user.get('aliases', [])
+                        for alias in old_aliases:
+                            delete_user_alias_by_api(settings, existing_user["id"], alias)
                         
                         # Если пароль был изменен - отправляем письмо
                         if password_changed:
@@ -859,11 +1100,11 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                                 # Пытаемся извлечь из existing_user
                                 try:
                                     about_data = json.loads(existing_user.get('about', '{}'))
-                                    personal_email = about_data.get('email', '')
+                                    personal_email = about_data.get('personal_email', '')
                                 except Exception:
                                     pass
                             
-                            if personal_email:
+                            if personal_email.strip():
                                 email_data = {
                                     'first': u.get('first') or existing_user['name'].get('first'),
                                     'middle': u.get('middle') or existing_user['name'].get('middle'),
@@ -875,9 +1116,8 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                                 }
                                 send_password_change_email(settings, email_data)
                             else:
-                                logger.warning("Не найден personal_email для отправки письма пользователю %s", u.get('login'))
-                    else:
-                        logger.error(f"Ошибка при обновлении пользователя {u.get('login')}")
+                                logger.warning(f"Не найден personal_email для отправки письма пользователю {u.get('login')}")
+                   
             else:
                 logger.info(f"Нет изменений для пользователя {u.get('login')}")
         
@@ -1632,6 +1872,461 @@ def validate_phone_number(phone):
     
     return True, formatted_number
 
+def validate_alias(settings: "SettingParams", alias: str) -> Tuple[bool, str]:
+    """
+    Проверяет корректность алиаса пользователя.
+    
+    Алиас должен:
+    - Не быть пустым
+    - Содержать только допустимые символы (буквы, цифры, точки, дефисы, подчеркивания)
+    - Начинаться и заканчиваться буквой или цифрой
+    - Иметь длину от 2 до 50 символов
+    
+    Args:
+        alias (str): Алиас для проверки
+        
+    Returns:
+        Tuple: (bool, str) - (результат проверки, причина ошибки или очищенный алиас)
+    """
+    if not alias:
+        return False, "Алиас не может быть пустым"
+    
+    # Убираем лишние пробелы
+    alias = alias.strip()
+    
+    if not alias:
+        return False, "Алиас не может состоять только из пробелов"
+    
+    # Проверка длины
+    if len(alias) < 2:
+        return False, "Алиас должен содержать минимум 2 символа"
+    
+    if len(alias) > 50:
+        return False, "Алиас не может содержать более 50 символов"
+    
+    # Проверка на допустимые символы (буквы, цифры, точки, дефисы, подчеркивания)
+    if not re.match(r'^[a-zA-Z0-9._-]+$', alias):
+        return False, "Алиас может содержать только буквы, цифры, точки, дефисы и подчеркивания"
+    
+    # Проверка на начало и конец (должны быть буквой или цифрой)
+    if not re.match(r'^[a-zA-Z0-9]', alias):
+        return False, "Алиас должен начинаться с буквы или цифры"
+    
+    if not re.match(r'[a-zA-Z0-9]$', alias):
+        return False, "Алиас должен заканчиваться буквой или цифрой"
+    
+    # Проверка на последовательные точки
+    if '..' in alias:
+        return False, "Алиас не может содержать последовательные точки"
+    
+    # Проверка на последовательные дефисы
+    if '--' in alias:
+        return False, "Алиас не может содержать последовательные дефисы"
+    
+    return True, alias
+
+def validate_shared_mailbox_email(settings: "SettingParams", email: str) -> Tuple[bool, str]:
+    """
+    Проверяет корректность email адреса для общего ящика.
+    Допустимые форматы: alias или alias@domain.com
+    
+    Args:
+        settings: Параметры настроек
+        email: Email адрес для проверки
+        
+    Returns:
+        Tuple: (bool, str) - (результат проверки, сообщение об ошибке или "OK")
+    """
+    if not email:
+        return False, "Email адрес не может быть пустым"
+    
+    email = email.strip()
+    if not email:
+        return False, "Email адрес не может быть пустым"
+    
+    # Проверка на недопустимые символы
+    if email.count('@') > 1:
+        return False, "Email адрес не может содержать более одного символа @"
+    
+    # Если есть @, проверяем полный формат alias@domain.com
+    if '@' in email:
+        local_part, domain = email.split('@', 1)
+        
+        if not local_part:
+            return False, "Локальная часть email адреса не может быть пустой"
+        
+        if not domain:
+            return False, "Домен email адреса не может быть пустым"
+        
+        # Проверка локальной части (alias)
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$', local_part):
+            return False, "Локальная часть должна начинаться и заканчиваться буквой или цифрой, может содержать точки, дефисы и подчеркивания"
+        
+        # Проверка домена
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$', domain):
+            return False, "Домен имеет некорректный формат"
+    else:
+        # Если нет @, проверяем только alias
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$', email):
+            return False, "Алиас должен начинаться и заканчиваться буквой или цифрой, может содержать точки, дефисы и подчеркивания"
+    
+    return True, "OK"
+
+
+def read_shared_mailboxes_file(settings: "SettingParams", file_path: str):
+    """
+    Читает файл shared.csv с общими ящиками и проводит валидацию.
+    
+    Формат файла:
+    - Разделитель: точка с запятой (;)
+    - Колонки: email, name, description
+    - Строки начинающиеся с # пропускаются
+    
+    Args:
+        settings: Параметры настроек
+        file_path: Путь к файлу shared.csv
+        
+    Returns:
+        Tuple: (bool, list, list) - (успех, список ящиков, список ошибок)
+    """
+    if not os.path.exists(file_path):
+        full_path = os.path.join(os.path.dirname(__file__), file_path)
+        if not os.path.exists(full_path):
+            logger.error(f'Ошибка! Файл {file_path} не существует!')
+            return False, [], [(0, f'Файл {file_path} не найден')]
+        else:
+            file_path = full_path
+    
+    mailboxes = []
+    errors = []
+    emails_seen = {}
+    line_number = 0
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.reader(csvfile, delimiter=';')
+            
+            # Читаем заголовок
+            try:
+                headers = next(reader)
+                line_number += 1
+                
+                # Очищаем заголовки от кавычек и пробелов
+                headers = [h.strip().replace('"', '') for h in headers]
+                
+                # Проверяем наличие необходимых колонок
+                required_headers = ['email', 'name', 'description']
+                if headers != required_headers:
+                    errors.append((line_number, f'Неверные заголовки. Ожидаются: {";".join(required_headers)}, получены: {";".join(headers)}'))
+                    return False, [], errors
+                    
+            except StopIteration:
+                errors.append((0, 'Файл пустой'))
+                return False, [], errors
+            
+            # Читаем данные
+            for row in reader:
+                line_number += 1
+                
+                # Пропускаем пустые строки
+                if not row or len(row) == 0:
+                    continue
+                
+                # Пропускаем строки начинающиеся с #
+                if row[0].strip().startswith('#'):
+                    logger.debug(f'Строка {line_number}: пропущена (комментарий)')
+                    continue
+                
+                # Проверяем количество колонок
+                if len(row) != 3:
+                    errors.append((line_number, f'Неверное количество колонок (ожидается 3, получено {len(row)})'))
+                    continue
+                
+                email = row[0].strip()
+                name = row[1].strip()
+                description = row[2].strip()
+                
+                # Проверяем email
+                is_valid, error_msg = validate_shared_mailbox_email(settings, email)
+                if not is_valid:
+                    errors.append((line_number, f'Некорректный email "{email}": {error_msg}'))
+                    continue
+                
+                # Проверяем на дубликаты
+                if email.lower() in emails_seen:
+                    errors.append((line_number, f'Дублирующийся email "{email}" (уже встречался в строке {emails_seen[email.lower()]})'))
+                    continue
+                
+                # Проверяем обязательные поля
+                if not name:
+                    errors.append((line_number, f'Поле "name" не может быть пустым для email "{email}"'))
+                    continue
+                
+                emails_seen[email.lower()] = line_number
+                mailboxes.append({
+                    'email': email,
+                    'name': name,
+                    'description': description,
+                    'line_number': line_number
+                })
+                
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno}: {e}")
+        errors.append((0, f'Ошибка при чтении файла: {e}'))
+        return False, [], errors
+    
+    if errors:
+        return False, mailboxes, errors
+    
+    return True, mailboxes, []
+
+
+def create_shared_mailbox_by_api(settings: "SettingParams", mailbox: dict):
+    """
+    Создает общий ящик через API Yandex 360.
+    
+    API endpoint: PUT /admin/v1/org/{orgId}/mailboxes/shared
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        mailbox: Словарь с данными ящика (email, name, description)
+        
+    Returns:
+        Tuple: (bool, dict) - (успех, ответ API)
+    """
+    url = f'{DEFAULT_360_API_URL}/admin/v1/org/{settings.org_id}/mailboxes/shared'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    
+    # Подготовка данных для API
+    api_data = {
+        "name": mailbox['name']
+    }
+    
+    # Добавляем email
+    if '@' in mailbox['email']:
+        api_data['email'] = mailbox['email']
+    else:
+        # Если указан только alias, добавляем домен
+        api_data['email'] = f"{mailbox['email']}@{settings.email_domain}" if settings.email_domain else mailbox['email']
+    
+    # Добавляем описание, если оно есть
+    if mailbox.get('description'):
+        api_data['description'] = mailbox['description']
+    
+    logger.debug(f"PUT URL: {url}")
+    logger.debug(f"PUT DATA: {api_data}")
+    
+    retries = 1
+    success = False
+    response_data = {}
+    
+    while True:
+        try:
+            if settings.dry_run:
+                logger.info(f"[DRY RUN] Пропущено создание общего ящика '{api_data['email']}' ('{mailbox['name']}')")
+                return True, {'email': api_data['email'], 'dry_run': True}
+            
+            response = requests.put(url, headers=headers, json=api_data)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            
+            if response.status_code == HTTPStatus.OK or response.status_code == HTTPStatus.CREATED:
+                logger.info(f"Успех - общий ящик '{api_data['email']}' ('{mailbox['name']}') создан успешно.")
+                response_data = response.json()
+                success = True
+                break
+            else:
+                # Проверяем на специфические ошибки
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('message', '')
+                    
+                    # Обработка ошибки "email уже занят"
+                    if error_message == 'passport_email_taken':
+                        logger.error(f"Ошибка: Email адрес '{api_data['email']}' уже используется в организации (не общим ящиком).")
+                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Email адрес занят (не общим ящиком).")
+                        response_data = {
+                            'error': 'Email адрес уже используется в организации (не общим ящиком)',
+                            'error_code': error_data.get('code'),
+                            'email': api_data['email'],
+                            'status_code': response.status_code
+                        }
+                        break  # Прерываем без повторных попыток
+                    elif error_message == 'Unauthorized':
+                        logger.error("Ошибка: Неверный токен.")
+                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Неверный токен.")
+                        response_data = {
+                            'error': 'Неверный токен',
+                            'error_code': error_data.get('code'),
+                            'email': api_data['email'],
+                            'status_code': response.status_code
+                        }
+                        break  # Прерываем без повторных попыток
+                    elif error_message == 'No required scope':
+                        logger.error("Ошибка: Не хватает прав для создания общего ящика.")
+                        logger.error("Добавьте права:")
+                        logger.error(" - ya360_admin:mail_write_shared_mailbox_inventory")
+                        logger.error(" - ya360_admin:mail_write_shared_mailbox_inventory")
+                        logger.error("в консоли управления доступом к API 360 (oauth.yandex.ru).")
+                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Не хватает прав для создания общего ящика.")
+                        response_data = {
+                            'error': 'Не хватает прав для создания общего ящика',
+                            'error_code': error_data.get('code'),
+                            'email': api_data['email'],
+                            'status_code': response.status_code
+                        }
+                        break  # Прерываем без повторных попыток
+                    elif error_message == 'resource_already_exists':
+                        logger.error(f"Ошибка: Общий ящик '{api_data['email']}' уже существует в организации.")
+                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Общий ящик уже существует в организации.")
+                        response_data = {
+                            'error': 'Общий ящик уже существует в организации',
+                            'error_code': error_data.get('code'),
+                            'email': api_data['email'],
+                            'status_code': response.status_code
+                        }
+                        break  # Прерываем без повторных попыток
+                    elif error_message == 'invalid_data':
+                        logger.error("Ошибка: Неверные данные в запросе Проверьте правильность заполнения полей email и name.")
+                        logger.error("В поле email должен быть указан email адрес в ОСНОВНОМ (ПО УМОЛЧАНИЮ) ДОМЕНЕ организации, либо, в случае указания только alias,")
+                        logger.error("в параметре EMAIL_DOMAIN должен быть указан основной (по умолчанию) домен организации. Сейчас указан: '{settings.email_domain}'")
+                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - неверные данные в запросе.")
+                        response_data = {
+                            'error': 'Неверные данные в запросе',
+                            'error_code': error_data.get('code'),
+                            'email': api_data['email'],
+                            'status_code': response.status_code
+                        }
+                        break  # Прерываем без повторных попыток
+                except (json.JSONDecodeError, ValueError):
+                    # Если не удалось распарсить JSON, продолжаем стандартную обработку
+                    pass
+                
+                logger.error(f"Ошибка при создании общего ящика: {response.status_code}. Сообщение: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Ошибка. Создание общего ящика '{api_data['email']}' не удалось.")
+                    response_data = {'error': response.text, 'status_code': response.status_code}
+                    break
+                    
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            response_data = {'error': str(e)}
+            break
+    
+    time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+    return success, response_data
+
+
+def import_shared_mailboxes_from_file(settings: "SettingParams", file_path: str = None):
+    """
+    Импортирует общие ящики из CSV файла.
+    
+    Args:
+        settings: Параметры настроек
+        file_path: Путь к файлу (по умолчанию берется из settings.shared_mailboxes_file)
+        
+    Returns:
+        bool: Успешность импорта
+    """
+    if file_path is None:
+        file_path = settings.shared_mailboxes_file
+    logger.info("-" * 100)
+    logger.info(f'Импорт общих ящиков из файла {file_path}')
+    logger.info("-" * 100)
+    
+    # Фаза 1: Чтение и валидация файла
+    logger.info("Фаза 1: Чтение и валидация файла")
+    success, mailboxes, errors = read_shared_mailboxes_file(settings, file_path)
+    
+    if errors:
+        logger.error("-" * 100)
+        logger.error("Обнаружены ошибки в файле:")
+        logger.error("-" * 100)
+        for line_num, error_msg in errors:
+            if line_num == 0:
+                logger.error(f"  {error_msg}")
+            else:
+                logger.error(f"  Строка {line_num}: {error_msg}")
+        logger.error("-" * 100)
+        logger.error("Импорт прерван. Исправьте ошибки и попробуйте снова.")
+        logger.error("-" * 100)
+        return False
+    
+    if not mailboxes:
+        logger.warning("В файле нет данных для импорта (все строки пропущены или файл пустой)")
+        return False
+    
+    logger.info(f"Файл успешно прочитан. Найдено {len(mailboxes)} общих ящиков для создания.")
+    logger.info("-" * 100)
+    
+    # Фаза 2: Создание общих ящиков
+    logger.info("Фаза 2: Создание общих ящиков")
+    logger.info("-" * 100)
+    
+    created_count = 0
+    failed_count = 0
+    
+    for mailbox in mailboxes:
+        logger.info(f"Создание общего ящика {mailbox['email']} (строка {mailbox['line_number']})...")
+        success, response = create_shared_mailbox_by_api(settings, mailbox)
+        
+        if success:
+            created_count += 1
+        else:
+            failed_count += 1
+    
+    # Итоги
+    logger.info("-" * 100)
+    logger.info("Импорт завершен")
+    logger.info("-" * 100)
+    logger.info(f"Всего обработано: {len(mailboxes)}")
+    logger.info(f"Успешно создано: {created_count}")
+    logger.info(f"Ошибок: {failed_count}")
+    logger.info("-" * 100)
+    
+    return failed_count == 0
+
+
+def import_shared_mailboxes_prompt(settings: "SettingParams"):
+    """
+    Интерактивная функция для импорта общих ящиков.
+    """
+    print("\n" + "=" * 100)
+    print("ИМПОРТ ОБЩИХ ЯЩИКОВ ИЗ ФАЙЛА")
+    print("=" * 100)
+    print(f"\nФормат файла {settings.shared_mailboxes_file}:")
+    print("  - Разделитель: точка с запятой (;)")
+    print("  - Заголовок: email;name;description")
+    print("  - Строки начинающиеся с # пропускаются")
+    print("  - Email может быть в формате 'alias' или 'alias@domain.com'")
+    print("\nПример:")
+    print("  email;name;description")
+    print("  support;Support Team;Общий ящик службы поддержки")
+    print("  info@example.com;Information;Информационный ящик")
+    print("  # sales;Sales Team;Этот ящик будет пропущен")
+    print("=" * 100)
+    
+    file_path = input(f"\nВведите путь к файлу (по умолчанию '{settings.shared_mailboxes_file}'): ").strip()
+    if not file_path:
+        file_path = settings.shared_mailboxes_file
+    
+    if not os.path.exists(file_path):
+        full_path = os.path.join(os.path.dirname(__file__), file_path)
+        if not os.path.exists(full_path):
+            logger.error(f"Файл {file_path} не найден!")
+            return
+    
+    confirm = input(f"\nНачать импорт из файла {file_path}? (да/нет): ").strip().lower()
+    if confirm not in ['да', 'yes', 'y', 'д']:
+        logger.info("Импорт отменен пользователем.")
+        return
+    
+    import_shared_mailboxes_from_file(settings, file_path)
+
+
 def get_all_api360_users(settings: "SettingParams", force = False):
     if not force:
         logger.info("Получение всех пользователей организации из кэша...")
@@ -1701,6 +2396,7 @@ class SettingParams:
     password_pattern : str
     deps_file : str
     all_users_file : str
+    shared_mailboxes_file : str
     smtp_server : str
     smtp_port : int
     smtp_login : str
@@ -1710,6 +2406,7 @@ class SettingParams:
     send_welcome_email : bool
     auto_generate_password : bool
     generated_password_length : int
+    smtp_type : str
 
 def get_settings():
     exit_flag = False
@@ -1724,6 +2421,7 @@ def get_settings():
         password_pattern = os.environ.get("PASSWORD_PATTERN"),
         deps_file = os.environ.get("DEPS_FILE","deps.csv"),
         all_users_file = os.environ.get("ALL_USERS_FILE","all_users.csv"),
+        shared_mailboxes_file = os.environ.get("SHARED_MAILBOXES_FILE","shared.csv"),
         smtp_server = os.environ.get("SMTP_SERVER", ""),
         smtp_port = int(os.environ.get("SMTP_PORT", "465")),
         smtp_login = os.environ.get("SMTP_LOGIN", ""),
@@ -1733,28 +2431,42 @@ def get_settings():
         send_welcome_email = os.environ.get("SEND_WELCOME_EMAIL", "false").lower() == "true",
         auto_generate_password = os.environ.get("AUTO_GENERATE_PASSWORD", "false").lower() == "true",
         generated_password_length = int(os.environ.get("GENERATED_PASSWORD_LENGTH", "12")),
+        smtp_type = os.environ.get("SMTP_TYPE", "ssl"),
     )
 
     if not settings.users_file:
-        logger.error("USERS_FILE_ARG не установлен.")
+        logger.error("USERS_FILE не установлен.")
         exit_flag = True
     
     if not settings.oauth_token:
-        logger.error("OAUTH_TOKEN_ARG не установлен.")
+        logger.error("OAUTH_TOKEN не установлен.")
         oauth_token_bad = True
 
     if not settings.org_id:
-        logger.error("ORG_ID_ARG не установлен.")
+        logger.error("ORG_ID не установлен.")
         exit_flag = True
 
     if not (oauth_token_bad or exit_flag):
         if not check_oauth_token(settings.oauth_token, settings.org_id):
-            logger.error("OAUTH_TOKEN_ARG не является действительным")
+            logger.error("OAUTH_TOKEN не является действительным")
             oauth_token_bad = True
 
     if not settings.password_pattern:
         logger.error("PASSWORD_PATTERN не установлен. Используется значение по умолчанию.")
         settings.password_pattern = DEFAULT_PASSWORD_PATTERN
+
+    if settings.smtp_port == 465:
+        if settings.smtp_type.lower() != "ssl":
+            if len(settings.smtp_type) == 0:
+                settings.smtp_type = "ssl"
+            else:
+                logger.warning("SMTP_TYPE для порта 465 обычно должен быть SSL. Могут быть проблемы с отправкой писем.")
+    elif settings.smtp_port == 587:
+        if settings.smtp_type.lower() != "starttls":
+            if len(settings.smtp_type) == 0:
+                settings.smtp_type = "starttls"
+            else:
+                logger.warning("SMTP_TYPE для порта 587 обычно должен быть STARTTLS. Могут быть проблемы с отправкой писем.")
 
     if oauth_token_bad:
         exit_flag = True
@@ -1799,8 +2511,8 @@ def create_user_by_api(settings: "SettingParams", user: dict):
                     logger.error(f"Ошибка. Создание пользователя {user['nickname']} ({user['name']['last']} {user['name']['first']}) не удалось.")
                     break
             else:
-                logger.info(f"Успех - пользователь {user['nickname']} ({user['name']['last']} {user['name']['first']}) создан успешно.")
                 added_user = response.json()
+                logger.info(f"Успех - пользователь {user['nickname']} ({user['name']['last']} {user['name']['first']}) создан успешно. UID = {added_user.get('uid')}")
                 success = True
                 break
         except Exception as e:
@@ -1837,6 +2549,183 @@ def patch_user_by_api(settings: "SettingParams", user_id: int, patch_data: dict)
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
     return success
+
+def create_user_alias_by_api(settings: "SettingParams", user_id: str, alias: str):
+    """
+    Добавляет алиас пользователю через API Yandex 360.
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        user_id: ID пользователя (строка)
+        alias: Алиас для добавления
+    
+    Returns:
+        tuple: (success: bool, response_data: dict)
+    """
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}/aliases'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    data = {"alias": alias}
+    
+    logger.debug(f"POST URL: {url}")
+    logger.debug(f"POST DATA: {data}")
+    
+    retries = 1
+    success = False
+    response_data = {}
+    
+    while True:
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            
+            if response.status_code == HTTPStatus.OK:
+                logger.info(f"Успех - алиас '{alias}' добавлен пользователю {user_id}.")
+                response_data = response.json()
+                success = True
+                break
+            else:
+                logger.error(f"Ошибка при добавлении алиаса: {response.status_code}. Сообщение: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Ошибка. Добавление алиаса '{alias}' пользователю {user_id} не удалось.")
+                    break
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            if retries < MAX_RETRIES:
+                logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                time.sleep(RETRIES_DELAY_SEC * retries)
+                retries += 1
+            else:
+                break
+    
+    return success, response_data
+
+def delete_user_alias_by_api(settings: "SettingParams", user_id: str, alias: str):
+    """
+    Удаляет алиас пользователю через API Yandex 360.
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        user_id: ID пользователя (строка)
+        alias: Алиас для удаления
+    
+    Returns:
+        tuple: (success: bool, response_data: dict)
+    """
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}/aliases/{alias}'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    
+    logger.debug(f"DELETE URL: {url}")
+    
+    retries = 1
+    success = False
+    response_data = {}
+    
+    while True:
+        try:
+            response = requests.delete(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            
+            if response.status_code == HTTPStatus.OK:
+                logger.info(f"Успех - алиас '{alias}' удален пользователю {user_id}.")
+                response_data = response.json()
+                success = True
+                break
+            else:
+                logger.error(f"Ошибка при удалении алиаса: {response.status_code}. Сообщение: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Ошибка. Удаление алиаса '{alias}' пользователю {user_id} не удалось.")
+                    break
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            if retries < MAX_RETRIES:
+                logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                time.sleep(RETRIES_DELAY_SEC * retries)
+                retries += 1
+            else:
+                break
+    
+    return success, response_data
+
+def add_aliases_to_users(settings: "SettingParams", users_data: list):
+    """
+    Добавляет алиасы пользователям из списка данных пользователей.
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        users_data: Список словарей с данными пользователей, включая поле 'aliases'
+    
+    Returns:
+        tuple: (success_count: int, failed_count: int, errors: list)
+    """
+    success_count = 0
+    failed_count = 0
+    errors = []
+    
+    logger.info(f"Начинаем добавление алиасов для {len(users_data)} пользователей...")
+    
+    for user_data in users_data:
+        user_id = user_data.get('id')
+        login = user_data.get('login', '')
+        aliases = user_data.get('aliases', [])
+        
+        if not user_id:
+            logger.error(f"Пользователь {login}: отсутствует ID пользователя")
+            failed_count += 1
+            errors.append(f"Пользователь {login}: отсутствует ID")
+            continue
+            
+        if not aliases:
+            logger.debug(f"Пользователь {login}: алиасы не указаны, пропускаем")
+            continue
+            
+        # Обрабатываем алиасы как строку или список
+        if isinstance(aliases, str):
+            aliases_list = [a.strip() for a in aliases.split(",") if a.strip()]
+        else:
+            aliases_list = aliases if isinstance(aliases, list) else []
+        
+        if not aliases_list:
+            logger.debug(f"Пользователь {login}: алиасы пусты, пропускаем")
+            continue
+            
+        logger.info(f"Добавляем алиасы для пользователя {login} (ID: {user_id}): {aliases_list}")
+        
+        user_success = True
+        for alias in aliases_list:
+            if not alias:
+                continue
+            
+            # Валидация алиаса
+            is_valid, validated_alias = validate_alias(alias)
+            if not is_valid:
+                logger.error(f"Пользователь {login}: некорректный алиас '{alias}': {validated_alias}")
+                user_success = False
+                errors.append(f"Пользователь {login}: некорректный алиас '{alias}': {validated_alias}")
+                continue
+                
+            success, response_data = create_user_alias_by_api(settings, user_id, validated_alias)
+            if not success:
+                logger.error(f"Не удалось добавить алиас '{validated_alias}' пользователю {login}")
+                user_success = False
+                errors.append(f"Пользователь {login}: не удалось добавить алиас '{validated_alias}'")
+            else:
+                logger.debug(f"Алиас '{validated_alias}' успешно добавлен пользователю {login}")
+        
+        if user_success:
+            success_count += 1
+        else:
+            failed_count += 1
+    
+    logger.info(f"Добавление алиасов завершено. Успешно: {success_count}, Ошибок: {failed_count}")
+    return success_count, failed_count, errors
 
 def get_all_api360_departments(settings: "SettingParams"):
     logger.info("Получение всех подразделений организации из API...")
@@ -2451,24 +3340,203 @@ def show_user_attributes(settings: "SettingParams", answer):
                 else:
                     f.write(f"{k}: {v}\n")
             f.write("--------------------------------------------------------\n")
-        logger.info(f"Атрибуты пользователя сохранены в файл: {target_user['nickname']}.txt")
+            logger.info(f"Атрибуты пользователя сохранены в файл: {target_user['nickname']}.txt")
     return
 
 def download_users_attrib_to_file(settings: "SettingParams"):
+    """
+    Выгружает данные пользователей из API 360 в два файла:
+    1. Файл с полным списком атрибутов пользователя, как возвращает API (settings.all_users_file)
+    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '.import.csv')
+    Также добавляет функцию проверки уникальности алиасов.
+    """
     users = get_all_api360_users(settings, force=True)
     if not users:
         logger.error("Не найдено пользователей из API 360. Проверьте ваши настройки.")
         return
-    else:
-        with open(settings.all_users_file, 'w', encoding='utf-8', newline='') as csv_file:
-            fieldnames = list(users[0].keys())
-            if "isEnabledUpdatedAt" not in fieldnames:
-                fieldnames.append("isEnabledUpdatedAt")
-            writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=fieldnames)
-            writer.writeheader()
-            for user in users:
-                writer.writerow(user)
-            logger.info(f"Сохранено {len(users)} пользователей в файл {settings.all_users_file}")
+
+    # --- 1. Выгрузка полного списка атрибутов пользователя ---
+    with open(settings.all_users_file, 'w', encoding='utf-8', newline='') as csv_file:
+        fieldnames = list(users[0].keys())
+        if "isEnabledUpdatedAt" not in fieldnames:
+            fieldnames.append("isEnabledUpdatedAt")
+        writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=fieldnames)
+        writer.writeheader()
+        for user in users:
+            writer.writerow(user)
+        logger.info(f"Сохранено {len(users)} пользователей в файл {settings.all_users_file}")
+
+    # --- 2. Выгрузка в формате для импорта (создания пользователей) ---
+    creation_fields = [
+        "login",
+        "first",
+        "middle",
+        "last",
+        "gender",
+        "password",
+        "department",
+        "position",
+        "personal_email",
+        "phone",
+        "is_enabled",
+        "is_admin",
+        "aliases",
+        "about"
+    ]
+
+    export_rows = []
+    for user in users:
+        row = {}
+        # login
+        row["login"] = user.get("nickname", "")
+        # first, middle, last
+        name = user.get("name", {})
+        row["last"] = name.get("last", "")
+        row["first"] = name.get("first", "")
+        row["middle"] = name.get("middle", "")
+        # gender
+        row["gender"] = user.get("gender", "")
+        # password (оставляем пустым, т.к. не выгружается из API)
+        row["password"] = ""
+        # department (id или название подразделения)
+        row["department"] = user.get("departmentId", "")
+        # position
+        row["position"] = user.get("position", "")
+        # personal_email (ищем в contacts/email или about)
+        personal_email = ""
+        contacts = user.get("contacts", [])
+        about = user.get("about", "")
+        if about:
+            try:
+                import json
+                about_json = json.loads(about)
+                personal_email = about_json.get("personal_email", "")
+            except Exception:
+                pass
+        row["personal_email"] = personal_email
+        # phone (ищем в contacts/phone)
+        phone = ""
+        for c in contacts:
+            if c.get("type") == "phone":
+                phone = c.get("value", "")
+                break
+        row["phone"] = phone
+        # is_enabled
+        row["is_enabled"] = str(user.get("isEnabled", ""))
+        # is_admin
+        row["is_admin"] = str(user.get("isAdmin", ""))
+        # aliases (список через запятую)
+        aliases = user.get("aliases", [])
+        if isinstance(aliases, list):
+            row["aliases"] = ",".join(aliases)
+        else:
+            row["aliases"] = ""
+        # about (оставляем как есть)
+        row["about"] = user.get("about", "")
+        export_rows.append(row)
+
+    import_file = settings.all_users_file + ".import.csv"
+    with open(import_file, 'w', encoding='utf-8', newline='') as csv_file:
+        writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=creation_fields)
+        writer.writeheader()
+        for row in export_rows:
+            writer.writerow(row)
+        logger.info(f"Сохранено {len(export_rows)} пользователей в файл {import_file}")
+
+def check_aliases_uniqueness(new_users, mode: str = "add"):
+    """
+    Проверяет уникальность всех алиасов среди nickname и aliases существующих пользователей (existing_users)
+    и среди nickname и aliases новых пользователей (new_users).
+    Возвращает True если все уникальны, иначе False и список конфликтов.
+    """
+
+    conflicts = []
+    temp_set = set()
+    existing_users = get_all_api360_users(settings, force=True)
+    if mode == "add":
+        for idx,new_user in enumerate(new_users):
+            found_flag = False
+            for y360_user in existing_users:
+                if new_user.get("login") == y360_user.get("nickname"):
+                    conflicts.append((idx+1, "login", new_user.get("login")))
+                    found_flag = True
+                temp_aliases = [item.lower().strip() for item in y360_user.get("aliases", []) if item.strip()]
+                for alias in new_user.get("aliases", "").split(","):
+                    if alias.split("@")[0].lower().strip() in temp_aliases:
+                        conflicts.append((idx+1, "alias", alias))
+                        found_flag = True
+                if found_flag:
+                    break
+
+        for idx,new_user1 in enumerate(new_users):
+            temp_set.clear()
+            for new_user2 in new_users:
+                if new_user1.get("login") != new_user2.get("login"):
+                    temp_set.add(new_user2.get("login"))
+                    for alias in new_user2.get("aliases", "").split(","):
+                        temp_set.add(alias.split("@")[0].lower().strip())
+            if new_user1.get("login") in temp_set:
+                conflicts.append((idx+1, "login", new_user1.get("login")))
+            for alias in new_user1.get("aliases", "").split(","):
+                if alias.split("@")[0].lower().strip() in temp_set:
+                    conflicts.append((idx+1, "alias", alias))
+    elif mode == "update":
+        for idx,new_user in enumerate(new_users):
+            found_flag = False
+            temp_set.clear()
+            for y360_user in existing_users:
+                if new_user.get("login") != y360_user.get("nickname"):
+                    temp_set.add(y360_user.get("nickname"))
+                    temp_aliases = [item.lower().strip() for item in y360_user.get("aliases", []) if item.strip()]
+                    for alias in temp_aliases:
+                        temp_set.add(alias)
+            for alias in new_user.get("aliases", "").split(","):
+                if alias.split("@")[0].lower().strip() in temp_aliases:
+                    conflicts.append((idx+1, "alias", alias.split("@")[0].lower().strip()))
+                    found_flag = True
+            if found_flag:
+                break
+
+        for idx,new_user1 in enumerate(new_users):
+            temp_set.clear()
+            for new_user2 in new_users:
+                if new_user1.get("login") != new_user2.get("login"):
+                    for alias in new_user2.get("aliases", "").split(","):
+                        temp_set.add(alias.split("@")[0].lower().strip())
+            
+            for alias in new_user1.get("aliases", "").split(","):
+                if alias.split("@")[0].lower().strip() in temp_set:
+                    conflicts.append((idx+1, "alias", alias))
+
+    if conflicts:
+        logger.error("Обнаружены неуникальные алиасы или логины среди новых и/или существующих пользователей:")
+        for rownum, typ, val in conflicts:
+            logger.error(f"Строка (не учитывая строки с комментариями) {rownum}: {typ} '{val}' уже используется")
+        return False, conflicts
+    return True, []
+
+
+def download_users_attrib_to_file2(settings: "SettingParams"):
+    """
+    Выгружает данные пользователей из API 360 в два файла:
+    1. Файл с полным списком атрибутов пользователя, как возвращает API (settings.all_users_file)
+    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '.import.csv')
+    """
+    users = get_all_api360_users(settings, force=True)
+    if not users:
+        logger.error("Не найдено пользователей из API 360. Проверьте ваши настройки.")
+        return
+
+    # --- 1. Выгрузка полного списка атрибутов пользователя ---
+    with open(settings.all_users_file, 'w', encoding='utf-8', newline='') as csv_file:
+        fieldnames = list(users[0].keys())
+        if "isEnabledUpdatedAt" not in fieldnames:
+            fieldnames.append("isEnabledUpdatedAt")
+        writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=fieldnames)
+        writer.writeheader()
+        for user in users:
+            writer.writerow(user)
+        logger.info(f"Сохранено {len(users)} пользователей в файл {settings.all_users_file}")
 
 def search_department_prompt(settings: "SettingParams"):
     print("\n")
@@ -2541,6 +3609,57 @@ def search_department_by_name(settings: "SettingParams", name: str):
 
 
 
+def test_add_aliases_prompt(settings: "SettingParams"):
+    """
+    Интерактивная функция для тестирования добавления алиасов пользователям.
+    """
+    print("\n=== Тестирование добавления алиасов пользователям ===")
+    
+    # Получаем логин пользователя
+    login = input("Введите логин пользователя: ").strip()
+    if not login:
+        print("Логин не может быть пустым.")
+        return
+    
+    # Ищем пользователя
+    found, user = find_user_by_login(settings, login)
+    if not found:
+        print(f"Пользователь с логином '{login}' не найден.")
+        return
+    
+    print(f"Найден пользователь: {user['nickname']} (ID: {user['id']})")
+    print(f"Текущие алиасы: {user.get('aliases', [])}")
+    
+    # Получаем алиас для добавления
+    alias = input("Введите алиас для добавления: ").strip()
+    if not alias:
+        print("Алиас не может быть пустым.")
+        return
+    
+    # Валидируем алиас
+    is_valid, validated_alias = validate_alias(alias)
+    if not is_valid:
+        print(f"Некорректный алиас: {validated_alias}")
+        return
+    
+    print(f"Валидация пройдена. Алиас: '{validated_alias}'")
+    
+    # Подтверждение
+    confirm = input(f"Добавить алиас '{validated_alias}' пользователю {user['nickname']}? (y/N): ").strip().lower()
+    if confirm not in ['y', 'yes', 'да']:
+        print("Операция отменена.")
+        return
+    
+    # Добавляем алиас
+    print("Добавляем алиас...")
+    success, response_data = create_user_alias_by_api(settings, user['id'], validated_alias)
+    
+    if success:
+        print(f"✅ Алиас '{validated_alias}' успешно добавлен пользователю {user['nickname']}")
+        print(f"Ответ API: {response_data}")
+    else:
+        print(f"❌ Не удалось добавить алиас '{validated_alias}' пользователю {user['nickname']}")
+
 def main_menu(settings: "SettingParams"):
 
     while True:
@@ -2552,11 +3671,12 @@ def main_menu(settings: "SettingParams"):
         print("4. Поиск подразделения по названию или алиасу.")
         print("5. Показать атрибуты пользователя.")
         print("6. Выгрузить всех пользователей в файл.")
+        print("7. Импортировать общие ящики из файла.")
         # print("3. Delete all contacts.")
         # print("4. Output bad records to file")
         print("0. (Ctrl+C) Выход")
         print("\n")
-        choice = input("Введите ваш выбор (0-6): ")
+        choice = input("Введите ваш выбор (0-7): ")
 
         if choice == "0":
             print("До свидания!")
@@ -2576,6 +3696,8 @@ def main_menu(settings: "SettingParams"):
             show_user_attributes_prompt(settings)
         elif choice == "6":
             download_users_attrib_to_file(settings)
+        elif choice == "7":
+            import_shared_mailboxes_prompt(settings)
         # elif choice == "4":
         #     analyze_data = add_contacts_from_file(True)
         #     OutputBadRecords(analyze_data)

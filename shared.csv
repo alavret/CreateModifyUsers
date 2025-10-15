@@ -1,0 +1,6 @@
+email;name;description
+shared_mailbox1;Support Team;Общий ящик службы поддержки
+shared_mailbox3;Information;Информационный ящик для общих запросов
+shared_mailbox2;Sales Department;Ящик отдела продаж
+# hr;Human Resources;Этот ящик будет пропущен при импорте
+

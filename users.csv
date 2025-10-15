@@ -1,4 +1,4 @@
-login;password;password_change_required;first_name;last_name;middle_name;position;gender;birthday;language;work_phone;mobile_phone;personal_email;department
-rpop-test1;$rfvBgt5^yhn;false;Александр;Иванов;Иванович;Директор;male;01.01.2009;ru;+71231231212;+7 123 1231212;alexander.ivanov@example.com;Team 1
-rpop-test2;$rfvBgt5^yhn;true;Мария;Петрова;Петровна;Администратор;female;05.05.1990;en;+798345623;+7 (123) 123-12-12;maria.petrova@example.com;Team 1|Team 2
-rpop-test3;$rfvBgt5^yhn;true;Павел;Сидоров;Александрович;Менеджер;male;20.06.2000;ru;+71234567890;+71231231212;pavel.sidorov@example.com;Team 1|Team 2|Team 3
+login;password;password_change_required;update_password;first_name;last_name;middle_name;position;gender;birthday;language;is_enabled;is_admin;work_phone;mobile_phone;personal_email;department;aliases
+#"alexander.ivanov";$1rfvBgt5^yhn;false;false;Александр;Иванов;Иванович;Директор;male;01.01.2009;r;;;+71231231212;+7 123 1231212;user@mail.ru;"Team 4";
+maria.petrova3;;false;false;Мария;Петрова;Ивановна;Менеджер;female;01.01.2009;ru;;;+71231231212;+7 123 1231212;user@mail.ru;"Team 4"|Team "5";
+pavel.sidorov;;true;;Павел;Сидоров;Александрович;Менеджер;male;20.06.2001;ru;;;+71234567890;+71231231212;user@yandex.ru;"Team 4"|Team "5"|Team "6";pavel1,pavel2
