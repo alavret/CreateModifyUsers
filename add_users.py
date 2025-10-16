@@ -2143,22 +2143,23 @@ def create_shared_mailbox_by_api(settings: "SettingParams", mailbox: dict):
                     # Обработка ошибки "email уже занят"
                     if error_message == 'passport_email_taken':
                         logger.error(f"Ошибка: Email адрес '{api_data['email']}' уже используется в организации (не общим ящиком).")
-                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Email адрес занят (не общим ящиком).")
+                        logger.error(f"!!! Общий ящик '{api_data['email']}' не может быть создан - Email адрес занят (не общим ящиком).")
                         response_data = {
                             'error': 'Email адрес уже используется в организации (не общим ящиком)',
                             'error_code': error_data.get('code'),
                             'email': api_data['email'],
-                            'status_code': response.status_code
+                            'status_code': response.status_code,
                         }
                         break  # Прерываем без повторных попыток
                     elif error_message == 'Unauthorized':
                         logger.error("Ошибка: Неверный токен.")
-                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Неверный токен.")
+                        logger.error(f"!!! Общий ящик '{api_data['email']}' не может быть создан - Неверный токен.")
                         response_data = {
                             'error': 'Неверный токен',
                             'error_code': error_data.get('code'),
                             'email': api_data['email'],
-                            'status_code': response.status_code
+                            'status_code': response.status_code,
+                            'forceStop': True
                         }
                         break  # Прерываем без повторных попыток
                     elif error_message == 'No required scope':
@@ -2167,34 +2168,36 @@ def create_shared_mailbox_by_api(settings: "SettingParams", mailbox: dict):
                         logger.error(" - ya360_admin:mail_write_shared_mailbox_inventory")
                         logger.error(" - ya360_admin:mail_write_shared_mailbox_inventory")
                         logger.error("в консоли управления доступом к API 360 (oauth.yandex.ru).")
-                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Не хватает прав для создания общего ящика.")
+                        logger.error(f"!!! Общий ящик '{api_data['email']}' не может быть создан - Не хватает прав для создания общего ящика.")
                         response_data = {
                             'error': 'Не хватает прав для создания общего ящика',
                             'error_code': error_data.get('code'),
                             'email': api_data['email'],
-                            'status_code': response.status_code
+                            'status_code': response.status_code,
+                            'forceStop': True
                         }
                         break  # Прерываем без повторных попыток
                     elif error_message == 'resource_already_exists':
                         logger.error(f"Ошибка: Общий ящик '{api_data['email']}' уже существует в организации.")
-                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - Общий ящик уже существует в организации.")
+                        logger.error(f"!!! Общий ящик '{api_data['email']}' не может быть создан - Общий ящик уже существует в организации.")
                         response_data = {
                             'error': 'Общий ящик уже существует в организации',
                             'error_code': error_data.get('code'),
                             'email': api_data['email'],
-                            'status_code': response.status_code
+                            'status_code': response.status_code,
                         }
                         break  # Прерываем без повторных попыток
                     elif error_message == 'invalid_data':
                         logger.error("Ошибка: Неверные данные в запросе Проверьте правильность заполнения полей email и name.")
-                        logger.error("В поле email должен быть указан email адрес в ОСНОВНОМ (ПО УМОЛЧАНИЮ) ДОМЕНЕ организации, либо, в случае указания только alias,")
-                        logger.error("в параметре EMAIL_DOMAIN должен быть указан основной (по умолчанию) домен организации. Сейчас указан: '{settings.email_domain}'")
-                        logger.error(f"Общий ящик '{api_data['email']}' не может быть создан - неверные данные в запросе.")
+                        logger.error("В поле email должен быть указан email адрес в ОСНОВНОМ (ПО УМОЛЧАНИЮ) ДОМЕНЕ организации.")
+                        logger.error("Eсли в поле email указан только alias, то в параметре EMAIL_DOMAIN должен быть указан")
+                        logger.error(f"основной (по умолчанию) домен организации. Сейчас указан: '{settings.email_domain}'")
+                        logger.error(f"!!! Общий ящик '{api_data['email']}' не может быть создан - неверные данные в запросе.")
                         response_data = {
                             'error': 'Неверные данные в запросе',
                             'error_code': error_data.get('code'),
                             'email': api_data['email'],
-                            'status_code': response.status_code
+                            'status_code': response.status_code,
                         }
                         break  # Прерываем без повторных попыток
                 except (json.JSONDecodeError, ValueError):
@@ -2207,7 +2210,7 @@ def create_shared_mailbox_by_api(settings: "SettingParams", mailbox: dict):
                     time.sleep(RETRIES_DELAY_SEC * retries)
                     retries += 1
                 else:
-                    logger.error(f"Ошибка. Создание общего ящика '{api_data['email']}' не удалось.")
+                    logger.error(f"!!! Ошибка. Создание общего ящика '{api_data['email']}' не удалось.")
                     response_data = {'error': response.text, 'status_code': response.status_code}
                     break
                     
@@ -2272,11 +2275,17 @@ def import_shared_mailboxes_from_file(settings: "SettingParams", file_path: str 
     for mailbox in mailboxes:
         logger.info(f"Создание общего ящика {mailbox['email']} (строка {mailbox['line_number']})...")
         success, response = create_shared_mailbox_by_api(settings, mailbox)
+        logger.info("\n")
         
         if success:
             created_count += 1
         else:
             failed_count += 1
+            if response.get('forceStop', False):
+                logger.error("Добавление общих ящиков прервано. Исправьте ошибки и попробуйте снова.")
+                logger.error("-" * 100)
+                failed_count = len(mailboxes)
+                break
     
     # Итоги
     logger.info("-" * 100)
@@ -3667,7 +3676,7 @@ def main_menu(settings: "SettingParams"):
         print("Выберите опцию:")
         print("1. Добавить пользователей из файла.")
         print("2. Обновить сотрудников из файла.")
-        print("3. Анализировать входной файл на ошибки.")
+        print("3. Анализировать входной файл для создания пользователей на ошибки.")
         print("4. Поиск подразделения по названию или алиасу.")
         print("5. Показать атрибуты пользователя.")
         print("6. Выгрузить всех пользователей в файл.")

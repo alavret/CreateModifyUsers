@@ -1130,8 +1130,12 @@ pip install -r requirements.txt
 
 ## Дополнительная документация
 
+### Общие почтовые ящики
 - [SHARED_MAILBOXES_README.md](docs/SHARED_MAILBOXES_README.md) - Подробное описание импорта общих ящиков
 - [SHARED_MAILBOXES_QUICK_START.md](docs/SHARED_MAILBOXES_QUICK_START.md) - Быстрый старт для импорта общих ящиков
+- [SHARED_MAILBOXES_ERROR_HANDLING_UPDATE.md](docs/SHARED_MAILBOXES_ERROR_HANDLING_UPDATE.md) - Обработка ошибок при создании общих ящиков
+
+### Валидация и безопасность
 - [EMAIL_VALIDATION_README.md](docs/EMAIL_VALIDATION_README.md) - Подробное описание валидации email адресов
 - [EMAIL_SENDING_README.md](docs/EMAIL_SENDING_README.md) - Подробное описание настройки и отправки email-уведомлений
 - [PASSWORD_VALIDATION_README.md](docs/PASSWORD_VALIDATION_README.md) - Подробное описание валидации паролей
