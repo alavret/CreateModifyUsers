@@ -34,7 +34,7 @@ DEFAULT_PASSWORD_PATTERN = r'^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\
 # DEFAULT_EMAIL_PATTERN is used to validate the personal email
 DEFAULT_EMAIL_PATTERN = r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?@[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$'
 
-USERS_CSV_REQUIRED_HEADERS = ["login", "password", "password_change_required", "first_name", "last_name", "middle_name", "position", "gender", "birthday", "language", "work_phone", "mobile_phone", "personal_email", "department", "is_enabled", "is_admin", "aliases", "update_password"]
+USERS_CSV_REQUIRED_HEADERS = ["id", "login", "password", "password_change_required", "first_name", "last_name", "middle_name", "position", "gender", "birthday", "language", "work_phone", "mobile_phone", "personal_email", "department", "is_enabled", "is_admin", "aliases", "update_password"]
 
 # MAX value is 1000
 USERS_PER_PAGE_FROM_API = 1000
@@ -133,6 +133,8 @@ def add_users_from_file_phase_1(settings: "SettingParams", analyze_only=False):
     logger.info('Проверка корректности данных.')
     logger.info("-" *100)
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
+    # заполнение кэша пользователей API 360 
+    users = get_all_api360_users(settings, force=True)
 
     if not analyze_only:
         check_aliases_uniqueness_result, check_aliases_uniqueness_errors = check_aliases_uniqueness(data, mode="add")
@@ -493,7 +495,10 @@ def add_users_from_file_phase_3(settings: "SettingParams", users: list):
         for dep in api_deps_hierarchy:
             if dep['path'] == user['department']:
                 patch_data={"departmentId": dep['id']}
-                patch_user_by_api(settings, user_id=user["id"], patch_data=patch_data)
+                # Если пользователь передан через функцию обновления, то используем поле user_id из словаря "пользователь", иначе используем поле id из словаря "пользоатель"
+                user_id_from_update_func = user.get('user_id',None)
+                user_id = user.get('id',user_id_from_update_func)
+                patch_user_by_api(settings, user_id=user_id, patch_data=patch_data)
                 break
 
     logger.info("-" * 100)
@@ -579,6 +584,8 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
     logger.info('Проверка корректности данных для обновления.')
     logger.info("-" *100)
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
+    # заполнение кэша пользователей API 360 
+    users = get_all_api360_users(settings, force=True)
 
     check_aliases_uniqueness_result, check_aliases_uniqueness_errors = check_aliases_uniqueness(data, mode="update")
     if not check_aliases_uniqueness_result:
@@ -588,13 +595,44 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
     for element in data:
         entry = {}
         stop_updating = False
+        user_id = 0
         line_number += 1
         logger.debug(f'Обработка строки #{line_number} {mask_sensitive_data(element)}')
         
         try:
-            # Логин (обязательное поле для поиска пользователя)
+            temp_user_id = element.get("id", 0)
+            if not all(c.isdigit() for c in temp_user_id):
+                logger.error(f'Строка #{line_number}. Некорректный ID пользователя _"{temp_user_id}"_. Должно быть число или пустая строка. Пропуск строки.')
+                if element not in error_lines:
+                    error_lines.append(element)
+                stop_updating = True
+
+            else:
+                temp_user_id = int(temp_user_id)
+                if temp_user_id > 0:
+                    if not temp_user_id >= 1130000000000000:
+                        logger.error(f'Строка #{line_number}. Некорректный ID пользователя _"{temp_user_id}"_. Должно быть число >= 1130000000000000. Пропуск строки.')
+                        if element not in error_lines:
+                            error_lines.append(element)
+                        stop_updating = True
+                    else:
+                        for user in users:
+                            if user['id'] == temp_user_id:
+                                entry["user_id"] = user["id"]
+                                user_id = user["id"]
+                                entry["existing_user"] = user
+                                break
+                        if user_id == 0:
+                            logger.error(f'Строка #{line_number}. Пользователь с ID _"{temp_user_id}"_ не найден в системе. Обновление отменено.')
+                            if element not in error_lines:
+                                error_lines.append(element)
+                            stop_updating = True
+
+            # Логин (обязательное поле для поиска пользователя если нет ID пользователя)
             temp_login = element["login"].lower()
-            if temp_login:
+            if temp_login and user_id > 0:
+                entry["login"] = temp_login
+            elif temp_login and user_id == 0:
                 if '@' in temp_login:
                     temp_login = element["login"].split('@')[0]
                 
@@ -608,10 +646,11 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                 else:
                     entry["login"] = temp_login
                     entry["user_id"] = existing_user["id"]
+                    
                     entry["existing_user"] = existing_user
                     logger.info(f'Строка #{line_number}. Найден пользователь: {existing_user["nickname"]} (ID: {existing_user["id"]})')
             else:
-                logger.error(f'Строка #{line_number}. Логин пуст. Отмена обновления пользователя.')
+                logger.error(f'Строка #{line_number}. Логин и ID пользователя пусты. Отмена обновления пользователя.')
                 if element not in error_lines:
                     error_lines.append(element)
                 stop_updating = True
@@ -861,8 +900,9 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
     logger.info("-" * 100)
     
     updated_users = []
+    users_with_new_deps = []
     # Часть атрибутов, нельзя изменить, если пользователь заблокирован в 360. Для них будем записывать в этот список и потом обновлять отдельным процессом 
-    change_for_disabled_users = []
+    
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
     
     for u in users:
@@ -870,10 +910,15 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
             existing_user = u.get('existing_user')
             user_id = u.get('user_id')
             changes = {}
+            changes_for_disabled_users = {}
             password_changed = False
             
             logger.info(f"Обработка пользователя: {u.get('login')} (ID: {user_id})")
             
+            # if u.get('login') and u.get('login').strip():
+            #     if existing_user.get('nickname') != u.get('login'):
+            #         changes['nickname'] = u.get('login').strip()
+            #         logger.debug(f"  Изменение логина: {existing_user.get('nickname')} -> {u.get('login')}")
             # Проверяем изменения в имени
             changes['name'] = {}
             if u.get('first') and existing_user['name'].get('first') != u.get('first'):
@@ -916,14 +961,12 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
             
             # Язык
             if u.get('language') and existing_user.get('language') != u.get('language'):
-                if existing_user.get('isEnabled') == 'false':
-                    temp_change = {
-                        'language': u.get('language').strip()
-                    }
-                    change_for_disabled_users.append({'user_id': user_id, 'changes': temp_change})
+                if not existing_user.get('isEnabled'):
+                    changes_for_disabled_users['language'] = u.get('language').strip()
                     logger.debug(f"  Язык нельзя изменить, пользователь {u.get('login')} заблокирован в 360. Откладываем процесс изменений.")
-                #changes['language'] = u.get('language').strip()
-                #logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
+                else:
+                    changes['language'] = u.get('language').strip()
+                    logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
             
             # Пол
             if u.get('gender') and existing_user.get('gender') != u.get('gender'):
@@ -1036,10 +1079,13 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     logger.debug("  Обновление about (personal_email)")
             
             # Подразделение
+            
             if u.get('department') and u.get('department').strip():
+                found_deps = False
                 dep_id = None
                 if u['department'].isdigit():
                     dep_id = int(u['department'])
+                    found_deps = True
                 else:
                     # Ищем подразделение по пути
                     strip_list = [x.strip() for x in u['department'].split(DEPS_SEPARATOR)]
@@ -1047,18 +1093,24 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     for dep in api_deps_hierarchy:
                         if dep['path'] == user_dep:
                             dep_id = dep['id']
+                            found_deps = True
                             break
+                if not found_deps:
+                    logger.error(f"Подразделение {u['department']} для пользователя {u.get('login')} (UID - {user_id}) не найдено в иерархии подразделений. Запрос на создание нового подразделения.")
                 
                 if dep_id and existing_user.get('departmentId') != dep_id:
                     changes['departmentId'] = dep_id
                     logger.debug(f"  Изменение подразделения: {existing_user.get('departmentId')} -> {dep_id}")
+                    changes['departmentId'] = dep_id
+                else:
+                    users_with_new_deps.append(u)
 
             elif u.get('department') and not u.get('department').strip():
                 changes['departmentId'] = 1
 
             
             # Если есть изменения - применяем их
-            if changes or u['raw_aliases']:
+            if changes or u['raw_aliases'] or changes_for_disabled_users or users_with_new_deps:
                 if settings.dry_run:
                     logger.info(f"Пробный запуск. Пользователь {u.get('login')} не будет обновлен. Изменения: {mask_sensitive_data(changes)}")
                 else:
@@ -1091,39 +1143,60 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                         old_aliases = existing_user.get('aliases', [])
                         for alias in old_aliases:
                             delete_user_alias_by_api(settings, existing_user["id"], alias)
+
+                    if changes_for_disabled_users:
+                        logger.info(f"Изменение данных пользователя, требующих разблокировки: {changes_for_disabled_users}")
+                        logger.info(f"Разблокировка пользователя {u.get('login')} (UID - {user_id})")
+                        result = patch_user_by_api(settings, user_id=user_id, patch_data={"isEnabled":"true"})
+                        if result:
+                            logger.info(f"Установка новых параметров для пользователя {u.get('login')} (UID - {user_id})")
+                            result = patch_user_by_api(settings, user_id=user_id, patch_data=changes_for_disabled_users)
+                            if not result:
+                                logger.error(f"Ошибка при обновлении пользователя {u.get('login')} (UID - {user_id})")
+                            logger.info(f"Блокировка пользователя {u.get('login')} (UID - {user_id})")
+                            result = patch_user_by_api(settings, user_id=user_id, patch_data={"isEnabled":"false"})
+                            if not result:
+                                logger.error(f"!!! Пользователь {u.get('login')} (UID - {user_id}) не был снова заблокирован.")
+                            updated_users.append(u)
+
+                    # Если пароль был изменен - отправляем письмо
+                    if password_changed:
+                        # Извлекаем personal_email из about
+                        personal_email = u.get('personal_email', '')
+                        if not personal_email:
+                            # Пытаемся извлечь из existing_user
+                            try:
+                                about_data = json.loads(existing_user.get('about', '{}'))
+                                personal_email = about_data.get('personal_email', '')
+                            except Exception:
+                                pass
                         
-                        # Если пароль был изменен - отправляем письмо
-                        if password_changed:
-                            # Извлекаем personal_email из about
-                            personal_email = u.get('personal_email', '')
-                            if not personal_email:
-                                # Пытаемся извлечь из existing_user
-                                try:
-                                    about_data = json.loads(existing_user.get('about', '{}'))
-                                    personal_email = about_data.get('personal_email', '')
-                                except Exception:
-                                    pass
-                            
-                            if personal_email.strip():
-                                email_data = {
-                                    'first': u.get('first') or existing_user['name'].get('first'),
-                                    'middle': u.get('middle') or existing_user['name'].get('middle'),
-                                    'last': u.get('last') or existing_user['name'].get('last'),
-                                    'login': u.get('login'),
-                                    'password': u.get('password'),
-                                    'password_change_required': u.get('password_change_required', 'false'),
-                                    'personal_email': personal_email
-                                }
-                                send_password_change_email(settings, email_data)
-                            else:
-                                logger.warning(f"Не найден personal_email для отправки письма пользователю {u.get('login')}")
-                   
+                        if personal_email.strip():
+                            email_data = {
+                                'first': u.get('first') or existing_user['name'].get('first'),
+                                'middle': u.get('middle') or existing_user['name'].get('middle'),
+                                'last': u.get('last') or existing_user['name'].get('last'),
+                                'login': u.get('login'),
+                                'password': u.get('password'),
+                                'password_change_required': u.get('password_change_required', 'false'),
+                                'personal_email': personal_email
+                            }
+                            send_password_change_email(settings, email_data)
+                        else:
+                            logger.warning(f"Не найден personal_email для отправки письма пользователю {u.get('login')}")
             else:
-                logger.info(f"Нет изменений для пользователя {u.get('login')}")
+                if not users_with_new_deps:
+                    logger.info(f"Нет изменений для пользователя {u.get('login')}")
+                else:
+                    logger.info(f"Пользователь {u.get('login')} имеет новые подразделения. Запрос на создание новых подразделений отложен до завершения обновления всех пользователей.")
         
         except Exception as e:
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
             continue
+
+    if users_with_new_deps:
+        logger.info(f"Есть запрос на добавление новых подразделений для {len(users_with_new_deps)} пользователей. Выполняем.")
+        add_users_from_file_phase_3(settings, users_with_new_deps)
     
     logger.info("-" * 100)
     logger.info(f'Обновление пользователей завершено. Обновлено: {len(updated_users)}')
@@ -1583,12 +1656,12 @@ def send_password_change_email(settings: "SettingParams", user_data: dict) -> bo
     html_body = render_email_template(template, user_data, settings)
     
     # Формируем тему письма
-    subject = f"Изменение пароля в Yandex 360"
+    subject = "Изменение пароля в Yandex 360"
     
     # Отправляем письмо
     return send_email(settings, personal_email, subject, html_body)
 
-def find_user_by_login(settings: "SettingParams", login: str) -> Tuple[bool, dict]:
+def find_user_by_login(settings: "SettingParams", login: str, search_in_aliases: bool = True) -> Tuple[bool, dict]:
     """
     Находит пользователя по логину (nickname или alias).
     
@@ -1603,7 +1676,7 @@ def find_user_by_login(settings: "SettingParams", login: str) -> Tuple[bool, dic
     if '@' in login:
         login = login.split('@')[0]
     
-    users = get_all_api360_users(settings, force=True)
+    users = get_all_api360_users(settings, force=False)
     
     for user in users:
         # Проверяем nickname
@@ -1612,6 +1685,7 @@ def find_user_by_login(settings: "SettingParams", login: str) -> Tuple[bool, dic
             return True, user
         
         # Проверяем aliases
+    if search_in_aliases:
         aliases_lower = [a.lower() for a in user.get('aliases', [])]
         if login in aliases_lower:
             logger.debug(f"Пользователь найден по alias: {user['nickname']} (ID: {user['id']})")
@@ -2663,6 +2737,65 @@ def delete_user_alias_by_api(settings: "SettingParams", user_id: str, alias: str
     
     return success, response_data
 
+def delete_user_by_api(settings: "SettingParams", user_id: str):
+    """
+    Удаляет пользователя через API Yandex 360.
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        user_id: ID пользователя (строка)
+    
+    Returns:
+        tuple: (success: bool, response_data: dict)
+    """
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    
+    logger.debug(f"DELETE URL: {url}")
+    
+    if settings.dry_run:
+        logger.info(f"DRY RUN: Пользователь {user_id} был бы удален.")
+        return True, {"dry_run": True}
+    
+    retries = 1
+    success = False
+    response_data = {}
+    
+    while True:
+        try:
+            response = requests.delete(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            
+            if response.status_code == HTTPStatus.OK:
+                logger.info(f"Успех - пользователь {user_id} удален.")
+                response_data = response.json() if response.text else {}
+                success = True
+                break
+            elif response.status_code == HTTPStatus.NO_CONTENT:
+                logger.info(f"Успех - пользователь {user_id} удален (204 No Content).")
+                response_data = {}
+                success = True
+                break
+            else:
+                logger.error(f"Ошибка при удалении пользователя: {response.status_code}. Сообщение: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Ошибка. Удаление пользователя {user_id} не удалось.")
+                    break
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            if retries < MAX_RETRIES:
+                logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                time.sleep(RETRIES_DELAY_SEC * retries)
+                retries += 1
+            else:
+                break
+    
+    return success, response_data
+
 def add_aliases_to_users(settings: "SettingParams", users_data: list):
     """
     Добавляет алиасы пользователям из списка данных пользователей.
@@ -3352,14 +3485,15 @@ def show_user_attributes(settings: "SettingParams", answer):
             logger.info(f"Атрибуты пользователя сохранены в файл: {target_user['nickname']}.txt")
     return
 
-def download_users_attrib_to_file(settings: "SettingParams"):
+def download_users_attrib_to_file(settings: "SettingParams", users: list = None):
     """
     Выгружает данные пользователей из API 360 в два файла:
     1. Файл с полным списком атрибутов пользователя, как возвращает API (settings.all_users_file)
-    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '.import.csv')
+    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '_short.csv')
     Также добавляет функцию проверки уникальности алиасов.
     """
-    users = get_all_api360_users(settings, force=True)
+    if not users:
+        users = get_all_api360_users(settings, force=True)
     if not users:
         logger.error("Не найдено пользователей из API 360. Проверьте ваши настройки.")
         return
@@ -3376,60 +3510,70 @@ def download_users_attrib_to_file(settings: "SettingParams"):
         logger.info(f"Сохранено {len(users)} пользователей в файл {settings.all_users_file}")
 
     # --- 2. Выгрузка в формате для импорта (создания пользователей) ---
+    departments = generate_deps_hierarchy_from_api(settings)
     creation_fields = [
+        "id",
         "login",
-        "first",
-        "middle",
-        "last",
-        "gender",
         "password",
-        "department",
+        "password_change_required",
+        "update_password",
+        "last_name",
+        "first_name",
+        "middle_name",
         "position",
-        "personal_email",
-        "phone",
+        "gender",
+        "birthday",
+        "language",
         "is_enabled",
         "is_admin",
-        "aliases",
-        "about"
+        "work_phone",
+        "mobile_phone",
+        "personal_email",
+        "department",
+        "aliases"
     ]
 
     export_rows = []
     for user in users:
         row = {}
         # login
+        row["id"] = user.get("id", "")
         row["login"] = user.get("nickname", "")
         # first, middle, last
         name = user.get("name", {})
-        row["last"] = name.get("last", "")
-        row["first"] = name.get("first", "")
-        row["middle"] = name.get("middle", "")
+        row["last_name"] = name.get("last", "")
+        row["first_name"] = name.get("first", "")
+        row["middle_name"] = name.get("middle", "")
         # gender
         row["gender"] = user.get("gender", "")
         # password (оставляем пустым, т.к. не выгружается из API)
         row["password"] = ""
+        # password_change_required
+        row["password_change_required"] = "false"
+        # update_password
+        row["update_password"] = "false"
         # department (id или название подразделения)
-        row["department"] = user.get("departmentId", "")
+        department_id = user.get("departmentId", "1")
+        if department_id == 1:
+            row["department"] = "Все пользователи"
+        else:
+            department = next((d for d in departments if d['id'] == department_id), None)
+            if department:
+                row["department"] = department['path']
+            else:
+                row["department"] = "Неизвестное подразделение"
         # position
         row["position"] = user.get("position", "")
         # personal_email (ищем в contacts/email или about)
         personal_email = ""
-        contacts = user.get("contacts", [])
         about = user.get("about", "")
         if about:
             try:
-                import json
                 about_json = json.loads(about)
                 personal_email = about_json.get("personal_email", "")
             except Exception:
                 pass
         row["personal_email"] = personal_email
-        # phone (ищем в contacts/phone)
-        phone = ""
-        for c in contacts:
-            if c.get("type") == "phone":
-                phone = c.get("value", "")
-                break
-        row["phone"] = phone
         # is_enabled
         row["is_enabled"] = str(user.get("isEnabled", ""))
         # is_admin
@@ -3440,11 +3584,22 @@ def download_users_attrib_to_file(settings: "SettingParams"):
             row["aliases"] = ",".join(aliases)
         else:
             row["aliases"] = ""
+
+        row["work_phone"] = ""
+        row["mobile_phone"] = ""
         # about (оставляем как есть)
-        row["about"] = user.get("about", "")
+        for contact in user.get('contacts', []):
+            if not contact['synthetic']:
+                if not contact['alias']:
+                    if contact['type'] == 'phone':
+                        label = contact.get('label', '').lower()
+                        if label == 'mobile':
+                            row["mobile_phone"] = contact['value']
+                        elif label == 'work':
+                            row["work_phone"] = contact['value']
         export_rows.append(row)
 
-    import_file = settings.all_users_file + ".import.csv"
+    import_file = settings.all_users_file.split(".")[0] + "_short.csv"
     with open(import_file, 'w', encoding='utf-8', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=creation_fields)
         writer.writeheader()
@@ -3461,7 +3616,7 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
 
     conflicts = []
     temp_set = set()
-    existing_users = get_all_api360_users(settings, force=True)
+    existing_users = get_all_api360_users(settings, force=False)
     if mode == "add":
         for idx,new_user in enumerate(new_users):
             found_flag = False
@@ -3470,9 +3625,9 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
                     conflicts.append((idx+1, "login", new_user.get("login")))
                     found_flag = True
                 temp_aliases = [item.lower().strip() for item in y360_user.get("aliases", []) if item.strip()]
-                for alias in new_user.get("aliases", "").split(","):
-                    if alias.split("@")[0].lower().strip() in temp_aliases:
-                        conflicts.append((idx+1, "alias", alias))
+                for alias in new_user.get("aliases", "").strip().split(","):
+                    if alias.strip().split("@")[0].lower().strip() in temp_aliases:
+                        conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
                         found_flag = True
                 if found_flag:
                     break
@@ -3482,15 +3637,17 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
             for new_user2 in new_users:
                 if new_user1.get("login") != new_user2.get("login"):
                     temp_set.add(new_user2.get("login"))
-                    for alias in new_user2.get("aliases", "").split(","):
-                        temp_set.add(alias.split("@")[0].lower().strip())
+                    for alias in new_user2.get("aliases", "").strip().split(","):
+                        temp_set.add(alias.strip().split("@")[0].lower().strip())
             if new_user1.get("login") in temp_set:
                 conflicts.append((idx+1, "login", new_user1.get("login")))
-            for alias in new_user1.get("aliases", "").split(","):
-                if alias.split("@")[0].lower().strip() in temp_set:
-                    conflicts.append((idx+1, "alias", alias))
+            for alias in new_user1.get("aliases", "").strip().split(","):
+                if alias.strip().split("@")[0].lower().strip() in temp_set:
+                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
     elif mode == "update":
         for idx,new_user in enumerate(new_users):
+            if not new_user.get("aliases"):
+                continue
             found_flag = False
             temp_set.clear()
             for y360_user in existing_users:
@@ -3499,23 +3656,25 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
                     temp_aliases = [item.lower().strip() for item in y360_user.get("aliases", []) if item.strip()]
                     for alias in temp_aliases:
                         temp_set.add(alias)
-            for alias in new_user.get("aliases", "").split(","):
-                if alias.split("@")[0].lower().strip() in temp_aliases:
-                    conflicts.append((idx+1, "alias", alias.split("@")[0].lower().strip()))
+            for alias in new_user.get("aliases", "").strip().split(","):
+                if alias.strip().split("@")[0].lower().strip() in temp_aliases:
+                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
                     found_flag = True
             if found_flag:
                 break
 
         for idx,new_user1 in enumerate(new_users):
+            if not new_user1.get("aliases"):
+                continue
             temp_set.clear()
             for new_user2 in new_users:
                 if new_user1.get("login") != new_user2.get("login"):
-                    for alias in new_user2.get("aliases", "").split(","):
+                    for alias in new_user2.get("aliases", "").strip().split(","):
                         temp_set.add(alias.split("@")[0].lower().strip())
             
-            for alias in new_user1.get("aliases", "").split(","):
+            for alias in new_user1.get("aliases", "").strip().split(","):
                 if alias.split("@")[0].lower().strip() in temp_set:
-                    conflicts.append((idx+1, "alias", alias))
+                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
 
     if conflicts:
         logger.error("Обнаружены неуникальные алиасы или логины среди новых и/или существующих пользователей:")
@@ -3529,7 +3688,6 @@ def download_users_attrib_to_file2(settings: "SettingParams"):
     """
     Выгружает данные пользователей из API 360 в два файла:
     1. Файл с полным списком атрибутов пользователя, как возвращает API (settings.all_users_file)
-    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '.import.csv')
     """
     users = get_all_api360_users(settings, force=True)
     if not users:
@@ -3616,7 +3774,98 @@ def search_department_by_name(settings: "SettingParams", name: str):
             logger.info("--------------------------------------------------------")
     return
 
+def download_users_attrib_to_file_prompt(settings: "SettingParams"):
 
+    print("\n")
+    print("Выгрузка атрибутов пользователей в файл.")
+    print("\n")
+    
+
+    while True:
+
+        users_to_add = False
+
+        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        if break_flag:
+            break
+        
+        if double_users_flag:
+            continue
+        
+        if not users_to_add:
+            logger.info("Выгрузка атрибутов всех пользователей в файл.")
+            download_users_attrib_to_file(settings)
+            break
+        else:
+            logger.info("Выгрузка атрибутов найденных пользователей в файл.")
+            download_users_attrib_to_file(settings, users_to_add)   
+            break
+
+
+def find_users_prompt(settings: "SettingParams"):
+    break_flag = False
+    double_users_flag = False
+
+    print("Введите данные для поиска пользователей в формате: ID, часть логина, алиаса или фамилии пользователя (пустая строка для ВСЕХ пользователей, минус для выхода)")
+    answer = input("Искать: ")
+
+    if answer.strip() == "-":
+        return True, double_users_flag, []
+    if not answer.strip():
+        return break_flag, double_users_flag, []
+
+    pattern = r'[;,\s]+'
+    search_users = re.split(pattern, answer)
+    users_to_add = []
+    #rus_pattern = re.compile('[-А-Яа-яЁё]+')
+    #anti_rus_pattern = r'[^\u0400-\u04FF\s]'
+
+    users = get_all_api360_users(settings, force=True)
+    if not users:
+        logger.info("No users found in Y360 organization.")
+        break_flag = True
+
+    for searched in search_users:
+        if "@" in searched.strip():
+            searched = searched.split("@")[0]
+        found_flag = False
+        if all(char.isdigit() for char in searched.strip()):
+            if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                for user in users:
+                    if user['id'] == searched.strip():
+                        logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                        users_to_add.append(user)
+                        found_flag = True
+                        break
+
+        else:
+            found_last_name_user = []
+            for user in users:
+                aliases_lower_case = [r.lower() for r in user['aliases']]
+                if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
+                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                    users_to_add.append(user)
+                    found_flag = True
+                    break
+                if user['name']['last'].lower().startswith(searched.lower().strip()):
+                    found_last_name_user.append(user)
+            if not found_flag and found_last_name_user:
+                if len(found_last_name_user) == 1:
+                    logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                    users_to_add.append(found_last_name_user[0])
+                    found_flag = True
+                else:
+                    logger.error(f"User {searched} found more than one user:")
+                    for user in found_last_name_user:
+                        logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                    logger.error("Refine your search parameters.")
+                    double_users_flag = True
+                    break
+
+        if not found_flag:
+            logger.error(f"User {searched} not found in Y360 organization.")
+
+    return break_flag, double_users_flag, users_to_add
 
 def test_add_aliases_prompt(settings: "SettingParams"):
     """
@@ -3669,6 +3918,325 @@ def test_add_aliases_prompt(settings: "SettingParams"):
     else:
         print(f"❌ Не удалось добавить алиас '{validated_alias}' пользователю {user['nickname']}")
 
+def delete_users_from_list(settings: "SettingParams", users_to_delete: list):
+    """
+    Удаляет список пользователей через API.
+    
+    Args:
+        settings: Параметры настроек
+        users_to_delete: Список пользователей для удаления
+    
+    Returns:
+        tuple: (success_count: int, failed_count: int)
+    """
+    if not users_to_delete:
+        logger.error("Список пользователей для удаления пуст.")
+        return 0, 0
+    
+    logger.info("-" * 100)
+    logger.info(f"Начинаем удаление {len(users_to_delete)} пользователей...")
+    logger.info("-" * 100)
+    
+    success_count = 0
+    failed_count = 0
+    
+    for user in users_to_delete:
+        user_id = user.get('id')
+        nickname = user.get('nickname', 'N/A')
+        name = f"{user.get('name', {}).get('last', '')} {user.get('name', {}).get('first', '')}".strip()
+        
+        logger.info(f"Удаление пользователя: {nickname} ({name}, ID: {user_id})")
+        
+        success, response_data = delete_user_by_api(settings, user_id)
+        
+        if success:
+            success_count += 1
+            logger.info(f"✓ Пользователь {nickname} успешно удален.")
+        else:
+            failed_count += 1
+            logger.error(f"✗ Не удалось удалить пользователя {nickname}.")
+        
+        # Небольшая пауза между запросами
+        time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+    
+    logger.info("-" * 100)
+    logger.info(f"Удаление завершено. Успешно: {success_count}, Ошибок: {failed_count}")
+    logger.info("-" * 100)
+    
+    return success_count, failed_count
+
+def delete_users_from_file(settings: "SettingParams", file_name: str):
+    """
+    Читает данные пользователей из CSV файла и удаляет их.
+    
+    Args:
+        settings: Параметры настроек
+        file_name: Имя CSV файла с пользователями для удаления
+    
+    Returns:
+        bool: True если удаление прошло успешно
+    """
+    if not os.path.exists(file_name):
+        full_path = os.path.join(os.path.dirname(__file__), file_name)
+        if not os.path.exists(full_path):
+            logger.error(f'Ошибка! Файл {file_name} не существует!')
+            return False
+        else:
+            file_name = full_path
+    
+    logger.info("-" * 100)
+    logger.info(f'Чтение пользователей из файла {file_name}')
+    logger.info("-" * 100)
+    
+    users_to_delete = []
+    all_api_users = get_all_api360_users(settings, force=False)
+    
+    if not all_api_users:
+        logger.error("Не удалось получить список пользователей из API 360.")
+        return False
+    
+    try:
+        with open(file_name, 'r', encoding='utf-8') as csvfile:
+            csv_reader = csv.DictReader(csvfile, delimiter=';')
+            line_number = 0
+            
+            for row in csv_reader:
+                line_number += 1
+                
+                # Пропускаем строки с комментариями
+                if row.get('id', '').startswith('#') or row.get('login', '').startswith('#'):
+                    logger.debug(f'Строка #{line_number} начинается с "#". Пропуск.')
+                    continue
+                
+                # Получаем id или login из файла
+                user_id = row.get('id', '').strip().strip('"')
+                login = row.get('login', '').strip().strip('"')
+                
+                if not user_id and not login:
+                    logger.warning(f'Строка #{line_number}: не указаны ни id, ни login. Пропуск.')
+                    continue
+                
+                # Ищем пользователя в API
+                found_user = None
+                
+                if user_id:
+                    # Поиск по ID
+                    found_user = next((u for u in all_api_users if u['id'] == user_id), None)
+                
+                if not found_user and login:
+                    # Поиск по логину
+                    login_clean = login.split('@')[0] if '@' in login else login
+                    found_user = next((u for u in all_api_users if u['nickname'].lower() == login_clean.lower()), None)
+                
+                if found_user:
+                    users_to_delete.append(found_user)
+                    logger.debug(f"Строка #{line_number}: найден пользователь {found_user['nickname']} (ID: {found_user['id']})")
+                else:
+                    logger.warning(f"Строка #{line_number}: пользователь с id={user_id} или login={login} не найден в организации.")
+    
+    except Exception as e:
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return False
+    
+    if not users_to_delete:
+        logger.warning("Не найдено пользователей для удаления в файле.")
+        return False
+    
+    # Показываем список пользователей для подтверждения
+    logger.info("\n")
+    logger.info("=" * 100)
+    logger.info(f"Найдено {len(users_to_delete)} пользователей для удаления:")
+    logger.info("=" * 100)
+    
+    for idx, user in enumerate(users_to_delete, 1):
+        name = f"{user.get('name', {}).get('last', '')} {user.get('name', {}).get('first', '')}".strip()
+        logger.info(f"{idx}. {user['nickname']} - {name} (ID: {user['id']})")
+    
+    logger.info("=" * 100)
+    
+    # Запрашиваем подтверждение
+    if len(users_to_delete) == 1:
+        prompt = "одного пользователя"
+    elif len(users_to_delete) > 4:
+        prompt = f"{len(users_to_delete)} пользователей"
+    else:
+        prompt = f"{len(users_to_delete)} пользователя"
+    confirm = input(f"\nВы уверены, что хотите удалить {prompt}? Введите число удаляемых пользователей для подтверждения: ").strip().lower()
+    
+    if confirm != str(len(users_to_delete)):
+        logger.info("Число удаляемых пользователей не совпадает с введенным числом. Отмена удаления.")
+        return False
+    
+    # Выполняем удаление
+    success_count, failed_count = delete_users_from_list(settings, users_to_delete)
+    
+    return failed_count == 0
+
+def delete_users_prompt(settings: "SettingParams"):
+    """
+    Интерактивная функция для удаления пользователей.
+    Позволяет ввести данные пользователей вручную или загрузить из файла.
+    """
+    print("\n")
+    print("=" * 100)
+    print("УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ")
+    print("=" * 100)
+    print("\n")
+    print("Введите данные пользователей для удаления:")
+    print("  - ID, логин, алиас или часть фамилии (несколько значений через запятую)")
+    print("  - Или нажмите Enter для загрузки пользователей для удаления из файла")
+
+    use_force_flag = False
+
+    while True:
+        print("\n")
+        user_input = input("Данные пользователей (или Enter для файла, минус ('-') для выхода): ").strip()
+        
+        users_to_delete = []
+
+        if user_input == "-":
+            break
+        
+        if not user_input:
+            # Пользователь выбрал загрузку из файла
+            print("\n")
+            print(f"Файл по умолчанию: {settings.users_file}")
+            file_input = input(f"Введите имя файла (или Enter для использования '{settings.users_file}'), минус ('-') для выхода: ").strip()
+            
+            if file_input == "-":
+                break
+            
+            if not file_input:
+                file_name = settings.users_file
+            else:
+                file_name = file_input
+            
+            # Удаляем из файла
+            if delete_users_from_file(settings, file_name):
+                break
+            else:
+                continue
+        
+        # Пользователь ввел данные вручную
+        logger.info("-" * 100)
+        logger.info("Поиск пользователей для удаления...")
+        logger.info("-" * 100)
+        
+        # Разбираем ввод
+        pattern = r'[;,\s]+'
+        search_terms = re.split(pattern, user_input)
+        
+        all_api_users = get_all_api360_users(settings, force=False)
+        
+        if not all_api_users:
+            logger.error("Не удалось получить список пользователей из API 360.")
+            break
+
+        found_multiple = False
+        
+        while True:
+            for search_term in search_terms:
+                if not search_term.strip():
+                    continue
+                
+                search_term = search_term.strip()
+                found_user = None
+                found_by_lastname = []
+                
+                # Убираем домен если есть
+                if "@" in search_term:
+                    search_term = search_term.split("@")[0]
+                
+                # Поиск по ID (16 символов, начинается с 113)
+                if all(char.isdigit() for char in search_term):
+                    if len(search_term) == 16 and search_term.startswith("113"):
+                        found_user = next((u for u in all_api_users if u["id"] == search_term), None)
+                        if found_user:
+                            logger.debug(f"Пользователь найден по ID: {found_user['nickname']} ({found_user['id']})")
+                            if found_user not in users_to_delete:
+                                users_to_delete.append(found_user)
+                                continue
+                            else:
+                                continue
+                
+                # Поиск по логину или алиасу
+                if not found_user:
+                    for user in all_api_users:
+                        aliases_lower = [a.lower() for a in user.get("aliases", [])]
+                        if user["nickname"].lower() == search_term.lower() or search_term.lower() in aliases_lower:
+                            found_user = user
+                            logger.debug(f"Пользователь найден по логину/алиасу: {user['nickname']} ({user['id']})")
+                        
+                        # Собираем совпадения по фамилии
+                        if user["name"]["last"].lower().startswith(search_term.lower()):
+                            found_by_lastname.append(user)
+                
+                # Если не найден по логину/алиасу, проверяем фамилии
+                if not found_user and found_by_lastname:
+                    if len(found_by_lastname) == 1:
+                        found_user = found_by_lastname[0]
+                        logger.debug(f"Пользователь найден по фамилии: {found_user['nickname']} ({found_user['id']})")
+                    else:
+                        logger.error(f"По запросу '{search_term}' найдено несколько пользователей:")
+                        for user in found_by_lastname:
+                            logger.error(f"  - {user['name']['last']} {user['name']['first']}, {user['nickname']} (ID: {user['id']}, {user.get('position', 'N/A')})")
+                        logger.error("Уточните параметры поиска.")
+                        found_multiple = True
+                        continue
+                
+                if found_user:
+                    if found_user not in users_to_delete:
+                        users_to_delete.append(found_user)
+                else:
+                    if not found_multiple:
+                        logger.error(f"Пользователь '{search_term}' не найден в организации.")
+            
+            if found_multiple:
+                logger.error("Найдено несколько совпадений. Удаление отменено.")
+                break
+            
+            if not users_to_delete:
+                logger.warning("Не найдено пользователей для удаления.")
+                if not use_force_flag:
+                    all_api_users = get_all_api360_users(settings, force=True)
+                    use_force_flag = True
+                else:
+                    break
+            else:
+                break
+        
+        if users_to_delete:
+            # Показываем список пользователей для подтверждения
+            logger.info("\n")
+            logger.info("=" * 100)
+            logger.info(f"Найдено {len(users_to_delete)} пользователей для удаления:")
+            logger.info("=" * 100)
+            
+            for idx, user in enumerate(users_to_delete, 1):
+                name = f"{user.get('name', {}).get('last', '')} {user.get('name', {}).get('first', '')}".strip()
+                logger.info(f"{idx}. {user['nickname']} - {name} (ID: {user['id']})")
+            
+            logger.info("=" * 100)
+            
+            # Запрашиваем подтверждение
+            if len(users_to_delete) == 1:
+                prompt = "одного пользователя"
+            elif len(users_to_delete) > 4:
+                prompt = f"{len(users_to_delete)} пользователей"
+            else:
+                prompt = f"{len(users_to_delete)} пользователя"
+            confirm = input(f"\nВы уверены, что хотите удалить {prompt}? Введите число удаляемых пользователей для подтверждения: ").strip().lower()
+            
+            if confirm != str(len(users_to_delete)):
+                logger.info("Число удаляемых пользователей не совпадает с введенным числом. Отмена удаления.")
+                continue
+            else:
+                # Выполняем удаление
+                delete_users_from_list(settings, users_to_delete)
+                break
+        
+        return True
+
 def main_menu(settings: "SettingParams"):
 
     while True:
@@ -3704,9 +4272,12 @@ def main_menu(settings: "SettingParams"):
         elif choice == "5":
             show_user_attributes_prompt(settings)
         elif choice == "6":
-            download_users_attrib_to_file(settings)
+            download_users_attrib_to_file_prompt(settings)
         elif choice == "7":
             import_shared_mailboxes_prompt(settings)
+        elif choice == "666":
+            print('\n')
+            delete_users_prompt(settings)
         # elif choice == "4":
         #     analyze_data = add_contacts_from_file(True)
         #     OutputBadRecords(analyze_data)
