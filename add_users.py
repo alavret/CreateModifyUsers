@@ -600,7 +600,7 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
         logger.debug(f'Обработка строки #{line_number} {mask_sensitive_data(element)}')
         
         try:
-            temp_user_id = element.get("id", 0)
+            temp_user_id = element.get("id", "0")
             if not all(c.isdigit() for c in temp_user_id):
                 logger.error(f'Строка #{line_number}. Некорректный ID пользователя _"{temp_user_id}"_. Должно быть число или пустая строка. Пропуск строки.')
                 if element not in error_lines:
@@ -617,9 +617,9 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                         stop_updating = True
                     else:
                         for user in users:
-                            if user['id'] == temp_user_id:
+                            if user['id'] == str(temp_user_id):
                                 entry["user_id"] = user["id"]
-                                user_id = user["id"]
+                                user_id = int(user["id"])
                                 entry["existing_user"] = user
                                 break
                         if user_id == 0:
@@ -696,10 +696,10 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                     error_lines.append(element)
                 stop_updating = True
             
-            entry["update_password"] = element.get("update_password",'').lower()
-            if entry["update_password"] not in ['true', 'false']:
-                entry["update_password"] = 'false'
+            entry["update_password"] = element.get("update_password",'false').lower()
+            if entry["update_password"] and entry["update_password"] not in ['true', 'false']:
                 logger.error(f'Строка #{line_number}. Неккорректный параметр update_password _"{entry["update_password"]}"_. Должно быть true или false. Параметр будет записан как false.')
+                entry["update_password"] = 'false'
 
             if entry["update_password"] == 'true':
             # Если password_change_required = true и password пустой - генерируем новый пароль
@@ -827,6 +827,7 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
                             if element not in error_lines:
                                 error_lines.append(element)
                             stop_updating = True
+
 
             # Рабочий телефон
             entry["work_phone"] = element.get("work_phone",'')
@@ -1086,6 +1087,9 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                 if u['department'].isdigit():
                     dep_id = int(u['department'])
                     found_deps = True
+                elif u.get('department').strip() == "Все пользователи":
+                    dep_id = 1
+                    found_deps = True
                 else:
                     # Ищем подразделение по пути
                     strip_list = [x.strip() for x in u['department'].split(DEPS_SEPARATOR)]
@@ -1102,7 +1106,7 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     changes['departmentId'] = dep_id
                     logger.debug(f"  Изменение подразделения: {existing_user.get('departmentId')} -> {dep_id}")
                     changes['departmentId'] = dep_id
-                else:
+                elif not dep_id:
                     users_with_new_deps.append(u)
 
             elif u.get('department') and not u.get('department').strip():
