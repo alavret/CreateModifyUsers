@@ -423,7 +423,9 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
                 user["id"] = created_user["id"]
                 temp_dict = {
                     "id": user["id"],
-                    "department": u['department']
+                    "department": u['department'],
+                    "isAdmin": u['is_admin'],
+                    "login": u['login']
                 }
                 added_users.append(temp_dict)
                 if len(u.get('aliases', [])) > 0:
@@ -454,6 +456,13 @@ def add_users_from_file_phase_3(settings: "SettingParams", users: list):
     if len(users) == 0:
         logger.info('Пользователи не добавлены.')
         return
+
+    logger.info('Проверка, есть ли пользователи с is_admin = true.')
+    for user in users:
+        if user['isAdmin']:
+            logger.info(f'Пользователь {user["login"]} имеет isAdmin = true. Установка этого значения.')
+            patch_user_by_api(settings, user_id=user["id"], patch_data={"isAdmin": "true"})
+
     logger.info('Работа с подразделениями пользователей.')
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
     deps_to_add = []
@@ -3630,9 +3639,10 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
                     found_flag = True
                 temp_aliases = [item.lower().strip() for item in y360_user.get("aliases", []) if item.strip()]
                 for alias in new_user.get("aliases", "").strip().split(","):
-                    if alias.strip().split("@")[0].lower().strip() in temp_aliases:
-                        conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
-                        found_flag = True
+                    if alias:
+                        if alias.strip().split("@")[0].lower().strip() in temp_aliases:
+                            conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
+                            found_flag = True
                 if found_flag:
                     break
 
@@ -3646,8 +3656,9 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
             if new_user1.get("login") in temp_set:
                 conflicts.append((idx+1, "login", new_user1.get("login")))
             for alias in new_user1.get("aliases", "").strip().split(","):
-                if alias.strip().split("@")[0].lower().strip() in temp_set:
-                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
+                if alias:
+                    if alias.strip().split("@")[0].lower().strip() in temp_set:
+                        conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
     elif mode == "update":
         for idx,new_user in enumerate(new_users):
             if not new_user.get("aliases"):
@@ -3661,9 +3672,10 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
                     for alias in temp_aliases:
                         temp_set.add(alias)
             for alias in new_user.get("aliases", "").strip().split(","):
-                if alias.strip().split("@")[0].lower().strip() in temp_aliases:
-                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
-                    found_flag = True
+                if alias:
+                    if alias.strip().split("@")[0].lower().strip() in temp_aliases:
+                        conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
+                        found_flag = True
             if found_flag:
                 break
 
@@ -3677,8 +3689,9 @@ def check_aliases_uniqueness(new_users, mode: str = "add"):
                         temp_set.add(alias.split("@")[0].lower().strip())
             
             for alias in new_user1.get("aliases", "").strip().split(","):
-                if alias.split("@")[0].lower().strip() in temp_set:
-                    conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
+                if alias:
+                    if alias.split("@")[0].lower().strip() in temp_set:
+                        conflicts.append((idx+1, "alias", alias.strip().split("@")[0].lower().strip()))
 
     if conflicts:
         logger.error("Обнаружены неуникальные алиасы или логины среди новых и/или существующих пользователей:")
@@ -4130,7 +4143,7 @@ def delete_users_prompt(settings: "SettingParams"):
         pattern = r'[;,\s]+'
         search_terms = re.split(pattern, user_input)
         
-        all_api_users = get_all_api360_users(settings, force=False)
+        all_api_users = get_all_api360_users(settings, force=True)
         
         if not all_api_users:
             logger.error("Не удалось получить список пользователей из API 360.")
