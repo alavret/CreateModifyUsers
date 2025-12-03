@@ -890,7 +890,9 @@ python add_users.py
 | directory:read_users | читать атрибуты пользователей |
 | directory:write_users | создавать пользователей и записывать в атрибуты пользователей |
 | directory:read_departments   | читать атрибуты подразделений
-|directory:write_departments | создавать подразделения и записывать в атрибуты подразделений
+| directory:write_departments | создавать подразделения и записывать в атрибуты подразделений |
+| directory:read_groups  | читать состав групп |
+| directory:write_groups  | читать состав групп |
 
 <img src="images/create_app_new_3.jpg" width="600">
 
