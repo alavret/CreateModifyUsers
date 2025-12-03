@@ -18,6 +18,7 @@ from email.mime.multipart import MIMEMultipart
 from email.header import Header
 import secrets
 import string
+import glob
 
 
 DEFAULT_360_API_URL = "https://api360.yandex.net"
@@ -26,7 +27,7 @@ MAX_RETRIES = 3
 LOG_FILE = "add_users.log"
 RETRIES_DELAY_SEC = 2
 SLEEP_TIME_BETWEEN_API_CALLS = 0.5
-ALL_USERS_REFRESH_IN_MINUTES = 15
+
 SENSITIVE_FIELDS = ['password', 'oauth_token', 'access_token', 'token']
 # DEFAULT_PASSWORD_PATTERN is used to validate the password
 DEFAULT_PASSWORD_PATTERN = r'^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]).{10,}$'
@@ -39,6 +40,7 @@ USERS_CSV_REQUIRED_HEADERS = ["id", "login", "password", "password_change_requir
 # MAX value is 1000
 USERS_PER_PAGE_FROM_API = 1000
 DEPARTMENTS_PER_PAGE_FROM_API = 100
+GROUPS_PER_PAGE_FROM_API = 1000
 
 DEPS_SEPARATOR = '|'
 CLEAR_FIELD_VALUE = '-'
@@ -49,6 +51,14 @@ EXIT_CODE = 1
 EMAIL_TEMPLATE_FILE = "email_template.html"
 PASSWORD_CHANGE_TEMPLATE_FILE = "password_change_template.html"
 SMTP_TIMEOUT = 10
+
+ALL_GROUPS_REFRESH_IN_MINUTES = 15
+ALL_DEPS_REFRESH_IN_MINUTES = 15
+EXTENDED_USERS_REFRESH_IN_MINUTES = 15
+ALL_USERS_REFRESH_IN_MINUTES = 15
+
+# Глобальная переменная для кэширования загруженных алиасов поисковых атрибутов
+_search_aliases_cache = None
 
 logger = logging.getLogger("add_users.log")
 logger.setLevel(logging.DEBUG)
@@ -806,7 +816,7 @@ def update_users_from_file_phase_1(settings: "SettingParams"):
 
 
             temp_aliases = element.get("aliases", "")
-            entry['raw_aliases'] = temp_aliases
+            entry['raw_aliases'] = temp_aliases.lower()
             entry["aliases"] = []
             if temp_aliases and temp_aliases.strip():
                 bad_aliases = False
@@ -931,15 +941,15 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
             #         logger.debug(f"  Изменение логина: {existing_user.get('nickname')} -> {u.get('login')}")
             # Проверяем изменения в имени
             changes['name'] = {}
-            if u.get('first') and existing_user['name'].get('first') != u.get('first'):
+            if u.get('first') and existing_user['name'].get('first').lower().strip() != u.get('first').lower().strip():
                 changes['name']['first'] = u.get('first').strip()
                 logger.debug(f"  Изменение имени: {existing_user['name'].get('first')} -> {u.get('first')}")
             
-            if u.get('last') and existing_user['name'].get('last') != u.get('last'):
+            if u.get('last') and existing_user['name'].get('last').lower().strip() != u.get('last').lower().strip():
                 changes['name']['last'] = u.get('last').strip()
                 logger.debug(f"  Изменение фамилии: {existing_user['name'].get('last')} -> {u.get('last')}")
             
-            if u.get('middle') and existing_user['name'].get('middle') != u.get('middle'):
+            if u.get('middle') and existing_user['name'].get('middle').lower().strip() != u.get('middle').lower().strip():
                 changes['name']['middle'] = u.get('middle').strip()
                 logger.debug(f"  Изменение отчества: {existing_user['name'].get('middle')} -> {u.get('middle')}")
 
@@ -965,12 +975,12 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     logger.debug(f"  Установка passwordChangeRequired: {u.get('password_change_required')}")
             
             # Должность
-            if u.get('position') and existing_user.get('position') != u.get('position'):
+            if u.get('position') and existing_user.get('position').lower().strip() != u.get('position').lower().strip():
                 changes['position'] = u.get('position').strip()
                 logger.debug(f"  Изменение должности: {existing_user.get('position')} -> {u.get('position')}")
             
             # Язык
-            if u.get('language') and existing_user.get('language') != u.get('language'):
+            if u.get('language') and existing_user.get('language').lower().strip() != u.get('language').lower().strip():
                 if not existing_user.get('isEnabled'):
                     changes_for_disabled_users['language'] = u.get('language').strip()
                     logger.debug(f"  Язык нельзя изменить, пользователь {u.get('login')} заблокирован в 360. Откладываем процесс изменений.")
@@ -979,7 +989,7 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     logger.debug(f"  Изменение языка: {existing_user.get('language')} -> {u.get('language')}")
             
             # Пол
-            if u.get('gender') and existing_user.get('gender') != u.get('gender'):
+            if u.get('gender') and existing_user.get('gender').lower().strip() != u.get('gender').lower().strip():
                 changes['gender'] = u.get('gender').strip()
                 logger.debug(f"  Изменение пола: {existing_user.get('gender')} -> {u.get('gender')}")
             
@@ -989,13 +999,13 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                 logger.debug(f"  Изменение даты рождения: {existing_user.get('birthday')} -> {u.get('birthday')}")
 
             if u.get('is_enabled') and u.get('is_enabled').strip():
-                if existing_user.get('isEnabled') != u.get('is_enabled'):
-                    changes['isEnabled'] = u.get('is_enabled').strip()
-                    logger.debug(f"  Изменение статуса пользователя: {existing_user.get('is_enabled')} -> {u.get('is_enabled')}")
+                if str(existing_user.get('isEnabled')).lower() != u.get('is_enabled').lower():
+                    changes['isEnabled'] = u.get('is_enabled').strip().lower()
+                    logger.debug(f"  Изменение статуса блокировки пользователя: {existing_user.get('is_enabled')} -> {u.get('is_enabled')}")
 
             if u.get('is_admin') and u.get('is_admin').strip():
-                if existing_user.get('isAdmin') != u.get('is_admin'):
-                    changes['isAdmin'] = u.get('is_admin').strip()
+                if str(existing_user.get('isAdmin')).lower() != u.get('is_admin').lower():
+                    changes['isAdmin'] = u.get('is_admin').strip().lower()
                     logger.debug(f"  Изменение статуса администратора: {existing_user.get('is_admin')} -> {u.get('is_admin')}")
             
             # Обработка контактов (телефоны)
@@ -1008,7 +1018,7 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                 if not contact['synthetic']:
                     if not contact['alias']:
                         if contact['type'] == 'phone':
-                            label = contact['label'].lower()
+                            label = contact.get('label', '').lower()
                             if label == 'mobile':
                                 if u.get('mobile_phone') and u.get('mobile_phone').strip():
                                     if contact['value'] != u.get('mobile_phone'):
@@ -1136,8 +1146,8 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                             logger.error(f"Ошибка при обновлении пользователя {u.get('login')}")
                     if u['raw_aliases'] and u['raw_aliases'].strip():
                         # Обработка алиасов
-                        new_aliases = u.get('aliases', [])
-                        old_aliases = existing_user.get('aliases', [])
+                        new_aliases = [a.lower() for a in u.get('aliases', [])]
+                        old_aliases = [a.lower() for a in existing_user.get('aliases', [])]
                         add_aliases = []
                         remove_aliases = []
                         for alias in new_aliases:
@@ -1199,7 +1209,8 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                             logger.warning(f"Не найден personal_email для отправки письма пользователю {u.get('login')}")
             else:
                 if not users_with_new_deps:
-                    logger.info(f"Нет изменений для пользователя {u.get('login')}")
+                    pass
+                    #logger.info(f"Нет изменений для пользователя {u.get('login')}")
                 else:
                     logger.info(f"Пользователь {u.get('login')} имеет новые подразделения. Запрос на создание новых подразделений отложен до завершения обновления всех пользователей.")
         
@@ -1220,12 +1231,51 @@ def update_users_from_file(settings: "SettingParams"):
     """
     Основная функция для обновления пользователей из файла
     """
-    result, data = update_users_from_file_phase_1(settings)
-    if not result:
-        return False, []
+    # Сканирование каталога на наличие файлов с шаблоном short_file_name_prefix_<timestamp>.csv
+    search_dir = settings.short_file_dir
+    search_pattern = f"{settings.short_file_name_prefix}_*.csv"
+    search_path = os.path.join(search_dir, search_pattern)
     
-    result, data = update_users_from_file_phase_2(settings, data)
-    return result, data
+    logger.info(f"Сканирование каталога '{search_dir}' для поиска файлов с шаблоном '{search_pattern}'...")
+    
+    matching_files = glob.glob(search_path)
+    
+    default_file = "users.csv"  # Значение по умолчанию
+    
+    if matching_files:
+        # Сортируем файлы по времени изменения (самый новый последний)
+        matching_files.sort(key=os.path.getmtime, reverse=True)
+        latest_file = matching_files[0]
+        default_file = latest_file
+        logger.info(f"Найдено {len(matching_files)} файл(ов) с указанным шаблоном.")
+        logger.info(f"Самый последний файл: {latest_file}")
+    else:
+        logger.info(f"Файлы с шаблоном '{search_pattern}' не найдены в каталоге '{search_dir}'.")
+        logger.info(f"Будет использоваться значение по умолчанию: {default_file}")
+    
+    # Запрос имени файла у пользователя
+    print("\n" + "=" * 100)
+    print("ОБНОВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ ИЗ ФАЙЛА")
+    print("=" * 100)
+    user_input = input(f"\nВведите путь к файлу для загрузки данных (по умолчанию '{default_file}'): ").strip()
+    
+    if not user_input:
+        user_input = default_file
+    
+    # Сохраняем оригинальное значение и временно заменяем его
+    original_users_file = settings.users_file
+    settings.users_file = user_input
+    
+    try:
+        result, data = update_users_from_file_phase_1(settings)
+        if not result:
+            return False, []
+        
+        result, data = update_users_from_file_phase_2(settings, data)
+        return result, data
+    finally:
+        # Восстанавливаем оригинальное значение
+        settings.users_file = original_users_file
 
 # Регулярное выражение для проверки фамилии
 def validate_name(line):
@@ -2388,10 +2438,10 @@ def import_shared_mailboxes_from_file(settings: "SettingParams", file_path: str 
 
 def import_shared_mailboxes_prompt(settings: "SettingParams"):
     """
-    Интерактивная функция для импорта общих ящиков.
+    Интерактивная функция для создания общих ящиков.
     """
     print("\n" + "=" * 100)
-    print("ИМПОРТ ОБЩИХ ЯЩИКОВ ИЗ ФАЙЛА")
+    print("СОЗДАНИЕ ОБЩИХ ЯЩИКОВ ИЗ ФАЙЛА")
     print("=" * 100)
     print(f"\nФормат файла {settings.shared_mailboxes_file}:")
     print("  - Разделитель: точка с запятой (;)")
@@ -2422,6 +2472,31 @@ def import_shared_mailboxes_prompt(settings: "SettingParams"):
     
     import_shared_mailboxes_from_file(settings, file_path)
 
+def get_extended_api360_users(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Получение расширенного списка всех пользователей организации из кэша...")
+
+    if not settings.extended_users or force or (datetime.now() - settings.extended_users_get_timestamp).total_seconds() > EXTENDED_USERS_REFRESH_IN_MINUTES * 60:
+        #logger.info("Получение всех пользователей организации из API...")
+        users = get_all_api360_users(settings, force)
+        deps = generate_deps_hierarchy_from_api(settings, force)
+        deps.append({'id': 1, 'path': 'Все сотрудники'})
+        groups = get_all_api360_groups(settings, force)
+        for user in users:
+            user['department'] = next((d['path'] for d in deps if d['id'] == user['departmentId']), None)
+            user_groups = []
+            if user.get('groups'):
+                for group_id in user['groups']:
+                    found_group = next((g for g in groups if g['id'] == group_id), None)
+                    if found_group:
+                        user_groups.append(found_group)  
+                    else:
+                        logger.warning(f"Группа с id {group_id} не найдена в списке групп. Пользователь: {user['name']}")
+            user['full_groups'] = user_groups
+        settings.extended_users = users
+        settings.extended_users_get_timestamp = datetime.now()
+
+    return settings.extended_users
 
 def get_all_api360_users(settings: "SettingParams", force = False):
     if not force:
@@ -2488,6 +2563,12 @@ class SettingParams:
     users_file : str
     all_users : list
     all_users_get_timestamp : datetime
+    extended_users : list
+    extended_users_get_timestamp : datetime
+    all_deps : list
+    all_deps_get_timestamp : datetime
+    all_groups : list
+    all_groups_get_timestamp : datetime
     dry_run : bool
     password_pattern : str
     deps_file : str
@@ -2503,6 +2584,9 @@ class SettingParams:
     auto_generate_password : bool
     generated_password_length : int
     smtp_type : str
+    short_file_name_prefix : str
+    short_file_dir : str
+    search_aliases_file : str
 
 def get_settings():
     exit_flag = False
@@ -2513,6 +2597,12 @@ def get_settings():
         org_id = os.environ.get("ORG_ID"),
         all_users = [],
         all_users_get_timestamp = datetime.now(),
+        extended_users = [],
+        extended_users_get_timestamp = datetime.now(),
+        all_deps = [],
+        all_deps_get_timestamp = datetime.now(),
+        all_groups = [],
+        all_groups_get_timestamp = datetime.now(),
         dry_run = os.environ.get("DRY_RUN","false").lower() == "true",
         password_pattern = os.environ.get("PASSWORD_PATTERN"),
         deps_file = os.environ.get("DEPS_FILE","deps.csv"),
@@ -2528,6 +2618,9 @@ def get_settings():
         auto_generate_password = os.environ.get("AUTO_GENERATE_PASSWORD", "false").lower() == "true",
         generated_password_length = int(os.environ.get("GENERATED_PASSWORD_LENGTH", "12")),
         smtp_type = os.environ.get("SMTP_TYPE", "ssl"),
+        short_file_name_prefix = os.environ.get("SHORT_FILE_NAME_PREFIX", "users"),
+        short_file_dir = os.environ.get("SHORT_FILE_DIR", "."),
+        search_aliases_file = os.environ.get("SEARCH_ALIASES_FILE", "search_aliases.txt"),
     )
 
     if not settings.users_file:
@@ -2615,6 +2708,68 @@ def create_user_by_api(settings: "SettingParams", user: dict):
             logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
 
     return success, added_user
+
+def get_user_by_api(settings: "SettingParams", user_id: str):
+    """
+    Получает информацию об одном сотруднике по его идентификатору.
+    
+    Args:
+        settings: Параметры настроек с OAuth токеном и org_id
+        user_id: Идентификатор сотрудника (string<uint64>)
+    
+    Returns:
+        Tuple[bool, dict]: (success, user_data)
+        - success: True если запрос успешен, False в противном случае
+        - user_data: Словарь с данными пользователя или пустой словарь при ошибке
+    """
+    url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/users/{user_id}'
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    logger.debug(f"GET URL: {url}")
+    retries = 1
+    user_data = {}
+    success = False
+    
+    while True:
+        try:
+            response = requests.get(url, headers=headers)
+            logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+            
+            if response.status_code == HTTPStatus.OK.value:
+                user_data = response.json()
+                logger.debug(f"Успешно получены данные пользователя с ID {user_id}")
+                success = True
+                break
+            elif response.status_code == HTTPStatus.NOT_FOUND.value:
+                logger.error(f"Пользователь с ID {user_id} не найден (404)")
+                break
+            elif response.status_code == HTTPStatus.UNAUTHORIZED.value:
+                logger.error(f"Ошибка авторизации (401): {response.text}")
+                break
+            elif response.status_code == HTTPStatus.FORBIDDEN.value:
+                logger.error(f"Нет прав доступа (403): {response.text}")
+                break
+            else:
+                logger.error(f"Ошибка при GET запросе: {response.status_code}. Сообщение об ошибке: {response.text}")
+                if retries < MAX_RETRIES:
+                    logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                    time.sleep(RETRIES_DELAY_SEC * retries)
+                    retries += 1
+                else:
+                    logger.error(f"Ошибка. Получение данных пользователя с ID {user_id} не удалось.")
+                    break
+        except requests.exceptions.RequestException as e:
+            logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            if retries < MAX_RETRIES:
+                logger.error(f"Повторная попытка ({retries+1}/{MAX_RETRIES})")
+                time.sleep(RETRIES_DELAY_SEC * retries)
+                retries += 1
+            else:
+                break
+        except Exception as e:
+            logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            break
+    
+    return success, user_data
 
 def patch_user_by_api(settings: "SettingParams", user_id: int, patch_data: dict):
 
@@ -2882,7 +3037,15 @@ def add_aliases_to_users(settings: "SettingParams", users_data: list):
     logger.info(f"Добавление алиасов завершено. Успешно: {success_count}, Ошибок: {failed_count}")
     return success_count, failed_count, errors
 
-def get_all_api360_departments(settings: "SettingParams"):
+def get_all_api360_departments(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Получение всех подразделений организации из кэша...")
+    if not settings.all_deps or force or (datetime.now() - settings.all_deps_get_timestamp).total_seconds() > ALL_DEPS_REFRESH_IN_MINUTES * 60:
+        settings.all_deps = get_all_api360_departments_from_api(settings)
+        settings.all_deps_get_timestamp = datetime.now()
+    return settings.all_deps
+
+def get_all_api360_departments_from_api(settings: "SettingParams"):
     logger.info("Получение всех подразделений организации из API...")
     url = f'{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/departments'
     headers = {"Authorization": f"OAuth {settings.oauth_token}"}
@@ -2929,6 +3092,60 @@ def get_all_api360_departments(settings: "SettingParams"):
         return []
     
     return departments
+
+def get_all_api360_groups(settings: "SettingParams", force = False):
+    if not force:
+        logger.info("Получение всех групп организации из кэша...")
+    if not settings.all_groups or force or (datetime.now() - settings.all_groups_get_timestamp).total_seconds() > ALL_GROUPS_REFRESH_IN_MINUTES * 60:
+        settings.all_groups = get_all_api360_groups_from_api(settings)
+        settings.all_groups_get_timestamp = datetime.now()
+    return settings.all_groups
+
+def get_all_api360_groups_from_api(settings: "SettingParams"):
+    logger.info("Получение всех групп организации из API...")
+    url = f"{DEFAULT_360_API_URL}/directory/v1/org/{settings.org_id}/groups"
+    headers = {"Authorization": f"OAuth {settings.oauth_token}"}
+    has_errors = False
+    groups = []
+    current_page = 1
+    last_page = 1
+    while current_page <= last_page:
+        params = {'page': current_page, 'perPage': GROUPS_PER_PAGE_FROM_API}
+        try:
+            retries = 1
+            while True:
+                logger.debug(f"GET URL - {url}")
+                response = requests.get(url, headers=headers, params=params)
+                logger.debug(f"x-request-id: {response.headers.get('x-request-id','')}")
+                if response.status_code != HTTPStatus.OK.value:
+                    logger.error(f"!!! ERROR !!! during GET request url - {url}: {response.status_code}. Error message: {response.text}")
+                    if retries < MAX_RETRIES:
+                        logger.error(f"Retrying ({retries+1}/{MAX_RETRIES})")
+                        time.sleep(RETRIES_DELAY_SEC * retries)
+                        retries += 1
+                    else:
+                        has_errors = True
+                        break
+                else:
+                    groups.extend(response.json()['groups'])
+                    logger.debug(f"Get {len(response.json()['groups'])} groups from page {current_page} (total {last_page} page(s)).")
+                    current_page += 1
+                    last_page = response.json()['pages']
+                    break
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"!!! ERROR !!! {type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+            has_errors = True
+            break
+
+        if has_errors:
+            break
+
+    if has_errors:
+        logger.error("There are some error during GET requests. Return empty groups list.")
+        return []
+    
+    return groups
 
 def delete_department_by_api(settings: "SettingParams", department: dict):
     logger.info(f"Удаление подразделения {department['id']} ({department['name']}) из API...")
@@ -3235,8 +3452,8 @@ def generate_unique_file_name(name):
     return final_file_name
 
 
-def generate_deps_hierarchy_from_api(settings: "SettingParams"):
-    all_deps_from_api = get_all_api360_departments(settings)
+def generate_deps_hierarchy_from_api(settings: "SettingParams", force = False):
+    all_deps_from_api = get_all_api360_departments(settings, force)
     if len(all_deps_from_api) == 1:
         #print('There are no departments in organozation! Exit.')
         return []
@@ -3253,11 +3470,11 @@ def generate_deps_hierarchy_from_api(settings: "SettingParams"):
             all_deps.append(element)
     return all_deps
 
-def generate_deps_hierarchy_and_count_users_from_api(settings: "SettingParams"):
-    users = get_all_api360_users(settings)
+def generate_deps_hierarchy_and_count_users_from_api(settings: "SettingParams", force = False):
+    users = get_all_api360_users(settings, force)
     if not users:
         return []
-    all_deps_from_api = generate_deps_hierarchy_from_api(settings)
+    all_deps_from_api = generate_deps_hierarchy_from_api(settings, force)
     if len(all_deps_from_api) == 1:
         #print('There are no departments in organozation! Exit.')
         return []
@@ -3276,8 +3493,8 @@ def generate_deps_hierarchy_and_count_users_from_api(settings: "SettingParams"):
             all_deps.append(element)
     return all_deps
 
-def load_dep_info_to_file(settings: "SettingParams"):
-    all_deps = generate_deps_hierarchy_from_api(settings)
+def load_dep_info_to_file(settings: "SettingParams", force = False):
+    all_deps = generate_deps_hierarchy_from_api(settings, force)
     write_deps_to_file(settings, all_deps)
     
 def write_deps_to_file(settings: "SettingParams", deps_list):
@@ -3427,7 +3644,11 @@ def show_user_attributes(settings: "SettingParams", answer):
         logger.error(f"Поиск {answer} не найден в организации Y360.")
         return
 
-    for target_user in users_to_add:
+    for target_user_short in users_to_add:
+        result, target_user = get_user_by_api(settings, target_user_short["id"])
+        if not result:
+            logger.error(f"Пользователь с id: {target_user_short['id']} не найден в организации Y360.")
+            continue
         logger.info("\n")
         logger.info("--------------------------------------------------------")
         logger.info(f'Атрибуты пользователя с id: {target_user["id"]}')
@@ -3506,21 +3727,47 @@ def download_users_attrib_to_file(settings: "SettingParams", users: list = None)
     Также добавляет функцию проверки уникальности алиасов.
     """
     if not users:
-        users = get_all_api360_users(settings, force=True)
+        all_users = get_all_api360_users(settings, force=True)
     if not users:
         logger.error("Не найдено пользователей из API 360. Проверьте ваши настройки.")
         return
 
     # --- 1. Выгрузка полного списка атрибутов пользователя ---
     with open(settings.all_users_file, 'w', encoding='utf-8', newline='') as csv_file:
-        fieldnames = list(users[0].keys())
+        if not users:
+            fieldnames = list(all_users[0].keys())
+        else:
+            fieldnames = list(users[0].keys())
+        # Исключаем ключ full_groups из fieldnames
+        if "full_groups" in fieldnames:
+            fieldnames.remove("full_groups")
         if "isEnabledUpdatedAt" not in fieldnames:
             fieldnames.append("isEnabledUpdatedAt")
         writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=fieldnames)
         writer.writeheader()
         for user in users:
-            writer.writerow(user)
+            # Создаем копию словаря без ключа full_groups
+            user_copy = {k: v for k, v in user.items() if k != 'full_groups'}
+            writer.writerow(user_copy)
         logger.info(f"Сохранено {len(users)} пользователей в файл {settings.all_users_file}")
+
+def download_users_attrib_to_file_short(settings: "SettingParams", users: list = None, query: str = ""):
+    """
+    Выгружает данные пользователей из API 360 в два файла:
+    1. Файл с полным списком атрибутов пользователя, как возвращает API (settings.all_users_file)
+    2. Файл с полями, аналогичными полям для создания пользователей (settings.all_users_file + '_short.csv')
+    Также добавляет функцию проверки уникальности алиасов.
+    
+    Args:
+        settings: параметры настроек
+        users: список пользователей (если None, будут загружены из API)
+        query: запрос, который использовался для создания файла (сохраняется во вторую строку)
+    """
+    # if not users:
+    #     users = get_all_api360_users(settings, force=True)
+    # if not users:
+    #     logger.error("Не найдено пользователей из API 360. Проверьте ваши настройки.")
+    #     return
 
     # --- 2. Выгрузка в формате для импорта (создания пользователей) ---
     departments = generate_deps_hierarchy_from_api(settings)
@@ -3612,10 +3859,22 @@ def download_users_attrib_to_file(settings: "SettingParams", users: list = None)
                             row["work_phone"] = contact['value']
         export_rows.append(row)
 
-    import_file = settings.all_users_file.split(".")[0] + "_short.csv"
+    # Генерация имени файла с временной меткой
+    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+    import_file = os.path.join(settings.short_file_dir, f"{settings.short_file_name_prefix}_{timestamp}.csv")
+    
     with open(import_file, 'w', encoding='utf-8', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, delimiter=';', fieldnames=creation_fields)
         writer.writeheader()
+        
+        # Записываем запрос во вторую строку как комментарий
+        if query:
+            # Добавляем символ # в начало и правильное количество разделителей для всех полей
+            # Количество разделителей = количество полей - 1
+            delimiter_count = len(creation_fields) - 1
+            query_line = f"# Запрос: {query}" + ";" * delimiter_count
+            csv_file.write(query_line + "\n")
+        
         for row in export_rows:
             writer.writerow(row)
         logger.info(f"Сохранено {len(export_rows)} пользователей в файл {import_file}")
@@ -3797,92 +4056,1361 @@ def download_users_attrib_to_file_prompt(settings: "SettingParams"):
     print("Выгрузка атрибутов пользователей в файл.")
     print("\n")
     
+    # Загружаем алиасы из файла при первом запуске функции
+    try:
+        load_search_aliases(settings)
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке алиасов: {e}")
+        print(f"\n❌ Ошибка при загрузке алиасов: {e}")
+        print("Будут использованы встроенные алиасы.\n")
 
     while True:
 
         users_to_add = False
 
-        break_flag, double_users_flag, users_to_add = find_users_prompt(settings)
+        break_flag, double_users_flag, users_to_add, search_query = find_users_prompt(settings)
         if break_flag:
             break
         
         if double_users_flag:
             continue
+ 
+        logger.info("Выгрузка атрибутов найденных пользователей в файл.")
+        download_users_attrib_to_file(settings, users_to_add)
+        download_users_attrib_to_file_short(settings, users_to_add, search_query)
+        break
+
+
+def wildcard_match(text: str, pattern: str) -> bool:
+    """
+    Проверяет, соответствует ли текст паттерну с поддержкой wildcards (*).
+    
+    Args:
+        text: Текст для проверки
+        pattern: Паттерн для сопоставления (может содержать * в начале или конце)
+    
+    Returns:
+        True если текст соответствует паттерну, иначе False
+    """
+    text = text.lower()
+    pattern = pattern.lower().strip()
+    
+    # Если нет wildcards, используем точное совпадение
+    if '*' not in pattern:
+        return text == pattern
+    
+    # Паттерн начинается и заканчивается wildcard: *pattern*
+    if pattern.startswith('*') and pattern.endswith('*'):
+        core = pattern[1:-1]
+        return core in text
+    
+    # Паттерн начинается с wildcard: *pattern
+    if pattern.startswith('*'):
+        core = pattern[1:]
+        return text.endswith(core)
+    
+    # Паттерн заканчивается wildcard: pattern*
+    if pattern.endswith('*'):
+        core = pattern[:-1]
+        return text.startswith(core)
+    
+    # Если wildcard в середине (не поддерживается по требованиям)
+    return False
+
+
+def wildcard_contains(text: str, pattern: str) -> bool:
+    """
+    Проверяет, содержится ли паттерн в тексте с поддержкой wildcards.
+    
+    Args:
+        text: Текст для проверки
+        pattern: Паттерн для сопоставления (может содержать * в начале или конце)
+    
+    Returns:
+        True если паттерн найден в тексте, иначе False
+    """
+    text = text.lower()
+    pattern = pattern.lower().strip()
+    
+    # Если нет wildcards, используем простой поиск подстроки
+    if '*' not in pattern:
+        return pattern in text
+    
+    # Паттерн начинается и заканчивается wildcard: *pattern*
+    if pattern.startswith('*') and pattern.endswith('*'):
+        core = pattern[1:-1]
+        return core in text
+    
+    # Паттерн начинается с wildcard: *pattern
+    if pattern.startswith('*'):
+        core = pattern[1:]
+        return core in text
+    
+    # Паттерн заканчивается wildcard: pattern*
+    if pattern.endswith('*'):
+        core = pattern[:-1]
+        return core in text
+    
+    return False
+
+
+def load_search_aliases(settings: "SettingParams") -> dict:
+    """
+    Загружает алиасы поисковых атрибутов из файла.
+    Выполняет проверку на уникальность атрибутов и алиасов.
+    
+    Args:
+        settings: Объект настроек приложения
+    
+    Returns:
+        Словарь алиасов в формате {alias: (real_attr, invert, contact_type, data_type)}
+    
+    Raises:
+        ValueError: Если найдены дубликаты алиасов или некорректный формат файла
+        FileNotFoundError: Если файл алиасов не найден
+    """
+    global _search_aliases_cache
+    
+    # Если алиасы уже загружены, возвращаем из кэша
+    if _search_aliases_cache is not None:
+        return _search_aliases_cache
+    
+    aliases_file = getattr(settings, 'search_aliases_file', None)
+    
+    if not aliases_file:
+        logger.warning("Не указан путь к файлу алиасов (SEARCH_ALIASES_FILE). Используются встроенные алиасы.")
+        # Возвращаем пустой словарь, будут использованы встроенные алиасы
+        _search_aliases_cache = {}
+        return _search_aliases_cache
+    
+    if not os.path.exists(aliases_file):
+        logger.error(f"Файл алиасов не найден: {aliases_file}")
+        raise FileNotFoundError(f"Файл алиасов не найден: {aliases_file}")
+    
+    logger.info("=" * 100)
+    logger.info(f"Загрузка алиасов поисковых атрибутов из файла: {aliases_file}")
+    logger.info("=" * 100)
+    
+    aliases = {}
+    seen_aliases = {}  # Для проверки уникальности алиасов
+    seen_attributes = {}  # Для отслеживания атрибутов
+    line_num = 0
+    
+    try:
+        with open(aliases_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                
+                # Пропускаем пустые строки и комментарии
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Парсим строку формата: alias=real_attr|invert|contact_type|data_type
+                if '=' not in line:
+                    logger.warning(f"Строка {line_num}: пропущена некорректная строка (нет символа '='): {line}")
+                    continue
+                
+                alias_part, value_part = line.split('=', 1)
+                alias = alias_part.strip().lower()
+                
+                if not alias:
+                    logger.warning(f"Строка {line_num}: пропущена строка с пустым алиасом")
+                    continue
+                
+                # Проверка на дубликаты алиасов
+                if alias in seen_aliases:
+                    error_msg = f"Строка {line_num}: найден дубликат алиаса '{alias}' (первое использование в строке {seen_aliases[alias]})"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                seen_aliases[alias] = line_num
+                
+                # Парсим значения
+                parts = value_part.split('|')
+                if len(parts) != 4:
+                    logger.warning(f"Строка {line_num}: некорректный формат значения (ожидается 4 части через '|'): {line}")
+                    continue
+                
+                real_attr = parts[0].strip()
+                invert_str = parts[1].strip().lower()
+                contact_type = parts[2].strip() if parts[2].strip() else None
+                data_type = parts[3].strip() if parts[3].strip() else None
+                
+                if not real_attr:
+                    logger.warning(f"Строка {line_num}: пропущена строка с пустым реальным атрибутом")
+                    continue
+                
+                # Преобразуем строку инверсии в boolean
+                invert = invert_str == 'true'
+                
+                # Сохраняем алиас
+                aliases[alias] = (real_attr, invert, contact_type, data_type)
+                
+                # Отслеживаем использование атрибутов (для информации)
+                if real_attr not in seen_attributes:
+                    seen_attributes[real_attr] = []
+                seen_attributes[real_attr].append((alias, line_num))
         
-        if not users_to_add:
-            logger.info("Выгрузка атрибутов всех пользователей в файл.")
-            download_users_attrib_to_file(settings)
-            break
+        logger.info(f"Успешно загружено {len(aliases)} алиасов для {len(seen_attributes)} атрибутов")
+        
+        # Выводим информацию об атрибутах и их алиасах
+        logger.debug("Загруженные атрибуты и их алиасы:")
+        for attr in sorted(seen_attributes.keys()):
+            alias_list = ', '.join([f"'{a[0]}'" for a in seen_attributes[attr]])
+            logger.debug(f"  {attr}: {alias_list}")
+        
+        _search_aliases_cache = aliases
+        return aliases
+        
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        logger.error(f"Ошибка при загрузке файла алиасов: {e}")
+        raise
+
+
+def normalize_attribute_name(attr_alias: str, settings: "SettingParams" = None) -> tuple:
+    """
+    Преобразует алиас атрибута в его реальное имя с флагом инверсии, типом контакта и типом данных.
+    
+    Args:
+        attr_alias: Алиас атрибута (например, 'first_name', 'имя', 'admin', 'phone', 'created')
+        settings: Объект настроек приложения (опционально, для загрузки алиасов из файла)
+    
+    Returns:
+        Кортеж (реальное_имя_атрибута, нужна_инверсия, тип_контакта, тип_данных)
+        Например: ('name.first', False, None, None), ('contacts', False, 'phone', None), ('createdAt', False, None, 'date')
+    
+    Raises:
+        ValueError: Если атрибут не найден в списке допустимых атрибутов и алиасов
+    """
+    # Загружаем алиасы из файла, если settings предоставлен
+    loaded_aliases = {}
+    if settings is not None:
+        try:
+            loaded_aliases = load_search_aliases(settings)
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить алиасы из файла: {e}. Используются встроенные алиасы.")
+    
+    # Встроенные алиасы атрибутов (используются как резервные)
+    builtin_aliases = {
+        # name.first алиасы
+        'first_name': ('name.first', False, None, None),
+        'имя': ('name.first', False, None, None),
+        'first': ('name.first', False, None, None),
+        
+        # name.last алиасы
+        'last_name': ('name.last', False, None, None),
+        'фамилия': ('name.last', False, None, None),
+        'last': ('name.last', False, None, None),
+        
+        # name.middle алиасы
+        'middle_name': ('name.middle', False, None, None),
+        'отчество': ('name.middle', False, None, None),
+        'middle': ('name.middle', False, None, None),
+        
+        # isAdmin алиасы
+        'admin': ('isAdmin', False, None, None),
+        'админ': ('isAdmin', False, None, None),
+        'is_admin': ('isAdmin', False, None, None),
+        
+        # isEnabled алиасы
+        'enabled': ('isEnabled', False, None, None),
+        'is_enabled': ('isEnabled', False, None, None),
+        
+        # isEnabled алиасы с инверсией (заблокирован = NOT isEnabled)
+        'blocked': ('isEnabled', True, None, None),
+        'заблокирован': ('isEnabled', True, None, None),
+        
+        # position алиасы
+        'должность': ('position', False, None, None),
+        
+        # department алиасы
+        'department': ('department', False, None, None),
+        'подразделение': ('department', False, None, None),
+        'ou': ('department', False, None, None),
+        'dep': ('department', False, None, None),
+        
+        # nickname алиасы
+        'алиас': ('nickname', False, None, None),
+        
+        # aliases алиасы (массив алиасов)
+        'aliases': ('aliases', False, None, 'array'),
+        'алиасы': ('aliases', False, None, 'array'),
+        
+        # contacts - phone алиасы
+        'телефон': ('contacts', False, 'phone', None),
+        'phone': ('contacts', False, 'phone', None),
+        'work_phone': ('contacts', False, 'phone', None),
+        'mobile_phone': ('contacts', False, 'phone', None),
+        
+        # contacts - email алиасы
+        'почта': ('contacts', False, 'email', None),
+        'mail': ('contacts', False, 'email', None),
+        'email': ('contacts', False, 'email', None),
+        
+        # date атрибуты - createdAt
+        'created': ('createdAt', False, None, 'date'),
+        'создан': ('createdAt', False, None, 'date'),
+        
+        # date атрибуты - isEnabledUpdatedAt
+        'дата_блокировки': ('isEnabledUpdatedAt', False, None, 'date'),
+        
+        # date атрибуты - updatedAt
+        'updated': ('updatedAt', False, None, 'date'),
+        'изменен': ('updatedAt', False, None, 'date'),
+        
+        # group атрибуты - имя группы
+        'groupname': ('full_groups.name', False, None, None),
+        'group_name': ('full_groups.name', False, None, None),
+        'имя_группы': ('full_groups.name', False, None, None),
+        
+        # group атрибуты - алиасы группы (поиск по group.aliases и group.label)
+        'groupaliases': ('full_groups.aliases', False, 'group_aliases', 'array'),
+        'group_aliases': ('full_groups.aliases', False, 'group_aliases', 'array'),
+        'алиасы_группы': ('full_groups.aliases', False, 'group_aliases', 'array'),
+    }
+    
+    # Объединяем загруженные и встроенные алиасы (загруженные имеют приоритет)
+    aliases = {**builtin_aliases, **loaded_aliases}
+    
+    # Список допустимых реальных имен атрибутов из API Yandex 360
+    valid_real_attributes = {
+        # Основные атрибуты
+        'id': (None, None),
+        'nickname': (None, None),
+        'aliases': (None, 'array'),  # массив алиасов
+        'name.first': (None, None),
+        'name.last': (None, None),
+        'name.middle': (None, None),
+        'isadmin': (None, None),
+        'isenabled': (None, None),
+        'position': (None, None),
+        'department': (None, None),
+        'departmentid': (None, None),
+        'gender': (None, None),
+        'language': (None, None),
+        'timezone': (None, None),
+        'about': (None, None),
+        'birthday': (None, None),
+        'contacts': (None, None),
+        
+        # Атрибуты группы
+        'full_groups.aliases': ('full_groups.aliases', 'array'),  # массив алиасов группы
+        'full_groups.label': (None, None),  # label группы (строка)
+        'full_groups.name': (None, None),  # имя группы
+        
+        # Атрибуты дат
+        'createdat': (None, 'date'),
+        'updatedat': (None, 'date'),
+        'isenabledupdatedat': (None, 'date'),  # правильное имя
+    }
+    
+    # Приводим к нижнему регистру для поиска
+    attr_lower = attr_alias.lower().strip()
+    
+    # Если это алиас, возвращаем реальное имя с флагами
+    if attr_lower in aliases:
+        return aliases[attr_lower]
+    
+    # Проверяем, является ли это реальным именем атрибута
+    if attr_lower in valid_real_attributes:
+        contact_type, data_type = valid_real_attributes[attr_lower]
+        return (attr_alias, False, contact_type, data_type)
+    
+    # Атрибут не найден - возбуждаем исключение
+    raise ValueError(f"Неизвестный атрибут: '{attr_alias}'. Используйте 'help' для списка допустимых атрибутов.")
+
+
+def parse_relative_date(value: str):
+    """
+    Парсит относительную дату в формате: [-]число[d|m|w|д|м|н]
+    
+    Args:
+        value: Строка с относительной датой (например, '-7d', '30д', '2w', '-1м')
+    
+    Returns:
+        datetime объект или None если не удалось распарсить
+    """
+    import re
+    from datetime import datetime, timedelta
+    
+    # Паттерн для относительных дат: опциональный минус, число, суффикс
+    pattern = r'^(-?)(\d+)([dmwдмн])$'
+    match = re.match(pattern, value.lower().strip())
+    
+    if not match:
+        return None
+    
+    sign, number, suffix = match.groups()
+    number = int(number)
+    
+    # Если есть минус, делаем число отрицательным
+    if sign == '-':
+        number = -number
+    
+    now = datetime.now()
+    
+    # Вычисляем дату в зависимости от суффикса
+    if suffix in ['d', 'д']:  # дни
+        return now + timedelta(days=number)
+    elif suffix in ['w', 'н']:  # недели
+        return now + timedelta(weeks=number)
+    elif suffix in ['m', 'м']:  # месяцы
+        # Простое вычисление месяцев без внешних библиотек
+        month = now.month + number
+        year = now.year
+        
+        while month > 12:
+            month -= 12
+            year += 1
+        while month < 1:
+            month += 12
+            year -= 1
+        
+        try:
+            return now.replace(year=year, month=month)
+        except ValueError:
+            # Если день месяца невалидный (например, 31 февраля), используем последний день месяца
+            import calendar
+            last_day = calendar.monthrange(year, month)[1]
+            return now.replace(year=year, month=month, day=min(now.day, last_day))
+    
+    return None
+
+
+def parse_date_value(value: str):
+    """
+    Парсит значение даты - может быть относительная дата или различные форматы.
+    
+    Поддерживает форматы:
+    - Относительные: -7d, 30д, 2w, -1м
+    - DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY
+    - YYYY-MM-DD, YYYY/MM/DD
+    - MM/DD/YYYY, DD.MM.YY, YYYY.MM.DD
+    - ISO формат с временем: YYYY-MM-DDTHH:MM:SSZ
+    
+    Args:
+        value: Строка с датой
+    
+    Returns:
+        datetime объект или None
+    """
+    from datetime import datetime
+    
+    # Сначала пробуем относительную дату
+    relative = parse_relative_date(value)
+    if relative:
+        return relative
+    
+    # Набор возможных форматов для проверки
+    date_formats = [
+        '%d.%m.%Y',  # DD.MM.YYYY
+        '%d/%m/%Y',  # DD/MM/YYYY
+        '%d-%m-%Y',  # DD-MM-YYYY
+        '%Y-%m-%d',  # YYYY-MM-DD (ISO формат)
+        '%Y/%m/%d',  # YYYY/MM/DD
+        '%m/%d/%Y',  # MM/DD/YYYY (US формат)
+        '%d.%m.%y',  # DD.MM.YY
+        '%Y.%m.%d',  # YYYY.MM.DD
+    ]
+    
+    # Попытка парсинга каждым из форматов
+    for date_format in date_formats:
+        try:
+            return datetime.strptime(value, date_format)
+        except:
+            pass
+    
+    # Пробуем ISO формат с временем
+    try:
+        if 'T' in value:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except:
+        pass
+    
+    return None
+
+
+def compare_dates(date1_str: str, operator: str, date2_str: str) -> bool:
+    """
+    Сравнивает две даты с учетом оператора.
+    
+    Args:
+        date1_str: Первая дата (строка в различных форматах)
+        operator: Оператор сравнения (<, >, <=, >=, =)
+        date2_str: Вторая дата (может быть относительной)
+    
+    Returns:
+        True если условие выполняется, иначе False
+    """
+    from datetime import datetime
+    
+    # Парсим первую дату (из API или других источников)
+    date_formats = [
+        '%d.%m.%Y',  # DD.MM.YYYY
+        '%d/%m/%Y',  # DD/MM/YYYY
+        '%d-%m-%Y',  # DD-MM-YYYY
+        '%Y-%m-%d',  # YYYY-MM-DD (ISO формат)
+        '%Y/%m/%d',  # YYYY/MM/DD
+        '%m/%d/%Y',  # MM/DD/YYYY (US формат)
+        '%d.%m.%y',  # DD.MM.YY
+        '%Y.%m.%d',  # YYYY.MM.DD
+    ]
+    
+    date1 = None
+    
+    # Пробуем ISO формат с временем
+    try:
+        if 'T' in date1_str:
+            date1 = datetime.fromisoformat(date1_str.replace('Z', '+00:00'))
+    except:
+        pass
+    
+    # Если не удалось, пробуем другие форматы
+    if not date1:
+        for date_format in date_formats:
+            try:
+                date1 = datetime.strptime(date1_str, date_format)
+                break
+            except:
+                pass
+    
+    if not date1:
+        return False
+    
+    # Парсим вторую дату (из запроса)
+    date2 = parse_date_value(date2_str)
+    if not date2:
+        return False
+    
+    # Убираем timezone для сравнения
+    if date1.tzinfo:
+        date1 = date1.replace(tzinfo=None)
+    if date2.tzinfo:
+        date2 = date2.replace(tzinfo=None)
+    
+    # Выполняем сравнение
+    if operator == '<':
+        return date1 < date2
+    elif operator == '>':
+        return date1 > date2
+    elif operator == '<=':
+        return date1 <= date2
+    elif operator == '>=':
+        return date1 >= date2
+    elif operator in ['=', 'is']:
+        # Для равенства сравниваем только даты, игнорируя время
+        return date1.date() == date2.date()
+    
+    return False
+
+
+def get_user_attribute(user: dict, attr_path: str):
+    """
+    Получает значение атрибута пользователя по пути (например, name.first).
+    
+    Args:
+        user: Объект пользователя
+        attr_path: Путь к атрибуту (например, 'name.first', 'nickname', 'isAdmin')
+    
+    Returns:
+        Значение атрибута или None если атрибут не найден
+    """
+    parts = attr_path.split('.')
+    value = user
+    
+    for part in parts:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
         else:
-            logger.info("Выгрузка атрибутов найденных пользователей в файл.")
-            download_users_attrib_to_file(settings, users_to_add)   
-            break
+            return None
+    
+    return value
+
+
+def is_complex_query(query: str) -> bool:
+    """
+    Определяет, является ли запрос сложным (содержит операторы сложного поиска).
+    
+    Args:
+        query: Строка запроса
+    
+    Returns:
+        True если запрос сложный, иначе False
+    """
+    query_lower = query.lower().strip()
+    
+    # Ключевые слова сложного поиска (включая операторы сравнения дат)
+    keywords = [' and ', ' or ', ' not ', ' in ', ' contains ', ' is ', '=', ' < ', ' > ', ' <= ', ' >= ', ' between ']
+    
+    # Проверяем наличие хотя бы одного ключевого слова
+    for keyword in keywords:
+        if keyword in query_lower:
+            return True
+    
+    # Проверяем, является ли это одиночным boolean атрибутом
+    # Список boolean атрибутов и их алиасов
+    boolean_attributes = [
+        'isadmin', 'admin', 'админ', 'is_admin',
+        'isenabled', 'enabled', 'blocked', 'заблокирован', 'is_enabled'
+    ]
+    
+    # Если запрос состоит из одного слова и это boolean атрибут
+    if ' ' not in query_lower and query_lower in boolean_attributes:
+        return True
+    
+    return False
+
+
+def parse_complex_query(query: str):
+    """
+    Парсит сложный запрос и возвращает структуру для выполнения.
+    
+    Args:
+        query: Строка сложного запроса
+    
+    Returns:
+        Список условий и логических операторов
+    """
+    # Разбираем запрос на токены
+    # Формат: attribute operator value [logical_op attribute operator value ...]
+    
+    tokens = []
+    current_token = ""
+    in_quotes = False
+    
+    for char in query:
+        if char in ['"', "'"]:
+            in_quotes = not in_quotes
+            current_token += char
+        elif char == ' ' and not in_quotes:
+            if current_token:
+                tokens.append(current_token)
+                current_token = ""
+        else:
+            current_token += char
+    
+    if current_token:
+        tokens.append(current_token)
+    
+    return tokens
+
+
+def evaluate_condition(user: dict, attribute: str, operator: str, value: str, contact_type: str = None, data_type: str = None) -> bool:
+    """
+    Оценивает одно условие для пользователя.
+    
+    Args:
+        user: Объект пользователя
+        attribute: Атрибут для проверки
+        operator: Оператор сравнения (=, is, contains, in, not, has_value, <, >, <=, >=, between)
+        value: Значение для сравнения
+        contact_type: Тип контакта для поиска в contacts ('phone', 'email') или 'group_aliases' для поиска в группах
+        data_type: Тип данных атрибута ('date' для дат, 'array' для массивов)
+    
+    Returns:
+        True если условие выполняется, иначе False
+    
+    Notes:
+        - Для атрибутов full_groups.* (name, label, aliases) выполняется поиск по всем группам пользователя
+        - Пользователь может быть в нескольких группах, условие считается выполненным, если хотя бы одна группа соответствует критерию
+    """
+    # Специальная обработка для массивов (например, aliases, group.aliases)
+    if data_type == 'array':
+        # Специальная обработка для full_groups.aliases - также проверяем full_groups.label
+        if contact_type == 'group_aliases':
+            full_groups = user.get('full_groups')
+            if not full_groups:
+                return False
+            
+            # Проверяем, что это список
+            if not isinstance(full_groups, list):
+                return False
+            
+            # has_value для full_groups.aliases - проверяем наличие хотя бы одной группы
+            if operator == 'has_value':
+                return len(full_groups) > 0
+            
+            # Очищаем значение от кавычек
+            search_value = value.strip('"').strip("'")
+            search_str = search_value.lower()
+            operator_lower = operator.lower()
+            
+            # Перебираем все группы пользователя
+            for group in full_groups:
+                if not isinstance(group, dict):
+                    continue
+                
+                # Собираем все значения для поиска из текущей группы: aliases (массив) + label (строка)
+                search_values = []
+                
+                # Добавляем aliases из group['aliases'] (если это массив)
+                group_aliases = group.get('aliases', [])
+                if isinstance(group_aliases, list):
+                    search_values.extend([str(alias).lower() for alias in group_aliases])
+                elif group_aliases:
+                    search_values.append(str(group_aliases).lower())
+                
+                # Добавляем label из group['label']
+                group_label = group.get('label')
+                if group_label:
+                    search_values.append(str(group_label).lower())
+                
+                # Проверяем каждое значение в текущей группе
+                for search_val in search_values:
+                    if operator_lower in ['=', 'is']:
+                        if '*' in search_str:
+                            if wildcard_match(search_val, search_str):
+                                return True
+                        else:
+                            if search_val == search_str:
+                                return True
+                    elif operator_lower == 'contains':
+                        if '*' in search_str:
+                            if wildcard_contains(search_val, search_str):
+                                return True
+                        else:
+                            if search_str in search_val:
+                                return True
+                    elif operator_lower == 'in':
+                        values = [v.strip().strip('"').strip("'").lower() for v in value.split(',')]
+                        if search_val in values:
+                            return True
+            
+            return False
+        
+        # Обычная обработка массивов (aliases и т.д.)
+        attr_value = get_user_attribute(user, attribute)
+        
+        if attr_value is None:
+            return False
+        
+        # Если это не список, преобразуем в список
+        if not isinstance(attr_value, list):
+            return False
+        
+        # has_value для массивов - проверяем, что массив не пустой
+        if operator == 'has_value':
+            return len(attr_value) > 0
+        
+        # Операторы = и contains для массивов - ищут элемент в массиве
+        if operator in ['=', 'is', 'contains']:
+            # Очищаем значение от кавычек
+            search_value = value.strip('"').strip("'")
+            
+            # Проверяем каждый элемент массива
+            for item in attr_value:
+                item_str = str(item).lower()
+                search_str = search_value.lower()
+                
+                # Если есть wildcard, используем wildcard_match
+                if '*' in search_str:
+                    if wildcard_match(item_str, search_str):
+                        return True
+                else:
+                    # Точное совпадение
+                    if item_str == search_str:
+                        return True
+            
+            return False
+        
+        return False
+    
+    # Специальная обработка для дат
+    if data_type == 'date':
+        attr_value = get_user_attribute(user, attribute)
+        
+        logger.debug(f"Проверка даты: атрибут={attribute}, значение={attr_value}, оператор={operator}, сравнение_с={value}")
+        
+        if attr_value is None or not attr_value:
+            return False
+        
+        # has_value для дат - проверяем, что дата существует
+        if operator == 'has_value':
+            return True
+        
+        # Операторы сравнения дат
+        if operator in ['<', '>', '<=', '>=', '=', 'is']:
+            result = compare_dates(str(attr_value), operator, value)
+            logger.debug(f"Результат сравнения дат: {result}")
+            return result
+        
+        # Оператор between для дат
+        if operator == 'between':
+            # Ожидаем формат: "date1 date2" или "date1,date2"
+            dates = value.replace(',', ' ').split()
+            if len(dates) >= 2:
+                date1 = parse_date_value(dates[0])
+                date2 = parse_date_value(dates[1])
+                
+                if date1 and date2:
+                    from datetime import datetime
+                    try:
+                        if 'T' in str(attr_value):
+                            attr_date = datetime.fromisoformat(str(attr_value).replace('Z', '+00:00'))
+                        else:
+                            attr_date = datetime.strptime(str(attr_value), '%Y-%m-%d')
+                        
+                        if attr_date.tzinfo:
+                            attr_date = attr_date.replace(tzinfo=None)
+                        if date1.tzinfo:
+                            date1 = date1.replace(tzinfo=None)
+                        if date2.tzinfo:
+                            date2 = date2.replace(tzinfo=None)
+                        
+                        return date1 <= attr_date <= date2
+                    except:
+                        pass
+            
+            return False
+        
+        return False
+    
+    # Специальная обработка для контактов
+    if contact_type:
+        contacts = user.get('contacts', [])
+        if not contacts:
+            return False
+        
+        # Фильтруем контакты по типу
+        filtered_contacts = [c for c in contacts if c.get('type') == contact_type]
+        
+        if not filtered_contacts:
+            return False
+        
+        # Специальный оператор для проверки наличия контакта
+        if operator == 'has_value':
+            return len(filtered_contacts) > 0
+        
+        # Убираем кавычки из значения
+        value = value.strip().strip('"').strip("'")
+        value_lower = value.lower()
+        operator_lower = operator.lower()
+        
+        # Проверяем каждый контакт нужного типа
+        for contact in filtered_contacts:
+            contact_value = str(contact.get('value', '')).lower()
+            
+            if operator_lower in ['=', 'is']:
+                if wildcard_match(contact_value, value_lower):
+                    return True
+            elif operator_lower == 'contains':
+                if wildcard_contains(contact_value, value_lower):
+                    return True
+            elif operator_lower == 'in':
+                values = [v.strip().strip('"').strip("'").lower() for v in value.split(',')]
+                if contact_value in values:
+                    return True
+        
+        return False
+    
+    # Специальная обработка для full_groups.name и full_groups.label
+    if attribute in ['full_groups.name', 'full_groups.label']:
+        full_groups = user.get('full_groups')
+        if not full_groups:
+            return False
+        
+        # Проверяем, что это список
+        if not isinstance(full_groups, list):
+            return False
+        
+        # has_value - проверяем наличие хотя бы одной группы
+        if operator == 'has_value':
+            return len(full_groups) > 0
+        
+        # Убираем кавычки из значения
+        value = value.strip().strip('"').strip("'")
+        value_lower = value.lower()
+        operator_lower = operator.lower()
+        
+        # Определяем, какое поле проверяем
+        field_name = attribute.split('.')[-1]  # 'name' или 'label'
+        
+        # Перебираем все группы пользователя
+        for group in full_groups:
+            if not isinstance(group, dict):
+                continue
+            
+            # Получаем значение поля из группы
+            field_value = group.get(field_name)
+            if not field_value:
+                continue
+            
+            attr_str = str(field_value).lower()
+            
+            # Операторы сравнения
+            if operator_lower in ['=', 'is']:
+                if wildcard_match(attr_str, value_lower):
+                    return True
+            elif operator_lower == 'contains':
+                if wildcard_contains(attr_str, value_lower):
+                    return True
+            elif operator_lower == 'in':
+                values = [v.strip().strip('"').strip("'").lower() for v in value.split(',')]
+                if attr_str in values:
+                    return True
+        
+        return False
+    
+    # Обычная обработка для не-контактов
+    attr_value = get_user_attribute(user, attribute)
+    
+    if attr_value is None:
+        return False
+    
+    # Специальный оператор для проверки наличия значения
+    if operator == 'has_value':
+        # Проверяем, что значение не пустое
+        if isinstance(attr_value, str):
+            return bool(attr_value.strip())
+        elif isinstance(attr_value, (list, dict)):
+            return len(attr_value) > 0
+        elif isinstance(attr_value, bool):
+            return True  # Boolean всегда имеет значение
+        elif isinstance(attr_value, (int, float)):
+            return True  # Числа всегда имеют значение
+        else:
+            return attr_value is not None
+    
+    # Убираем кавычки из значения
+    value = value.strip().strip('"').strip("'")
+    
+    # Специальная обработка для атрибута department - удаляем все пробелы
+    if attribute.lower() == 'department':
+        if isinstance(attr_value, str):
+            attr_str = attr_value.replace(' ', '').lower()
+        else:
+            attr_str = str(attr_value).replace(' ', '').lower()
+        value_lower = value.replace(' ', '').lower()
+        operator_lower = operator.lower()
+    else:
+        # Преобразуем атрибут в строку для сравнения
+        if isinstance(attr_value, bool):
+            attr_str = str(attr_value).lower()
+        elif isinstance(attr_value, (int, float)):
+            attr_str = str(attr_value)
+        elif isinstance(attr_value, list):
+            # Для списков проверяем каждый элемент
+            attr_str = None
+        else:
+            attr_str = str(attr_value).lower()
+        
+        value_lower = value.lower()
+        operator_lower = operator.lower()
+    
+    # Операторы сравнения
+    if operator_lower in ['=', 'is']:
+        if isinstance(attr_value, list):
+            # Для списков проверяем вхождение
+            return any(wildcard_match(str(item).lower(), value_lower) for item in attr_value)
+        else:
+            return wildcard_match(attr_str, value_lower)
+    
+    elif operator_lower == 'contains':
+        if isinstance(attr_value, list):
+            # Для списков проверяем вхождение
+            return any(wildcard_contains(str(item).lower(), value_lower) for item in attr_value)
+        else:
+            return wildcard_contains(attr_str, value_lower)
+    
+    elif operator_lower == 'in':
+        # Проверка вхождения в список значений
+        values = [v.strip().strip('"').strip("'").lower() for v in value.split(',')]
+        if isinstance(attr_value, list):
+            return any(str(item).lower() in values for item in attr_value)
+        else:
+            return attr_str in values
+    
+    return False
+
+
+def execute_complex_query(users: list, query: str, settings: "SettingParams" = None) -> list:
+    """
+    Выполняет сложный запрос и возвращает список найденных пользователей.
+    
+    Args:
+        users: Список всех пользователей
+        query: Строка сложного запроса
+        settings: Объект настроек приложения (опционально, для загрузки алиасов из файла)
+    
+    Returns:
+        Список пользователей, соответствующих запросу
+    """
+    tokens = parse_complex_query(query)
+    
+    logger.debug(f"Сложный запрос: {query}")
+    logger.debug(f"Токены: {tokens}")
+    
+    if not tokens:
+        return []
+    
+    result = []
+    
+    # Список boolean атрибутов (в нормализованной форме)
+    boolean_attrs = ['isAdmin', 'isEnabled']
+    
+    # Список операторов сравнения (включая операторы для дат)
+    comparison_operators = ['=', 'is', 'contains', 'not', 'in', '<', '>', '<=', '>=', 'between']
+    
+    # Простой парсер для обработки запросов
+    i = 0
+    conditions = []
+    logical_ops = []
+    
+    while i < len(tokens):
+        # Пропускаем лишние операторы в начале
+        if tokens[i].lower() in ['and', 'or']:
+            i += 1
+            continue
+        
+        try:
+            # Проверяем на "not <boolean_attribute>"
+            if tokens[i].lower() == 'not' and i + 1 < len(tokens):
+                next_attr, attr_negate, contact_type, data_type = normalize_attribute_name(tokens[i + 1], settings)
+                if next_attr in boolean_attrs:
+                    # Это паттерн "not <boolean_attribute>"
+                    # Инвертируем negate: если атрибут уже инвертирован, NOT отменяет инверсию
+                    final_negate = not attr_negate
+                    conditions.append((next_attr, '=', 'true', final_negate, contact_type, data_type))
+                    i += 2
+                    
+                    # Проверяем наличие логического оператора
+                    if i < len(tokens) and tokens[i].lower() in ['and', 'or']:
+                        logical_ops.append(tokens[i].lower())
+                        i += 1
+                    continue
+            
+            # Нормализуем атрибут для проверки
+            current_attr, attr_negate, contact_type, data_type = normalize_attribute_name(tokens[i], settings)
+            
+        except ValueError as e:
+            # Неизвестный атрибут
+            logger.error(f"Ошибка в запросе: {str(e)}")
+            print(f"\n❌ {str(e)}")
+            return []
+        
+        # Проверяем, является ли это одиночным boolean атрибутом
+        if current_attr in boolean_attrs:
+            # Проверяем, есть ли следующий токен и является ли он оператором
+            if i + 1 < len(tokens):
+                next_token = tokens[i + 1].lower()
+                # Если следующий токен - логический оператор, значит это одиночный атрибут
+                if next_token in ['and', 'or']:
+                    conditions.append((current_attr, '=', 'true', attr_negate, contact_type, data_type))
+                    i += 1
+                    # Добавляем логический оператор
+                    if i < len(tokens):
+                        logical_ops.append(tokens[i].lower())
+                        i += 1
+                    continue
+                # Если следующий токен - оператор сравнения, обрабатываем как обычно
+                elif next_token not in comparison_operators:
+                    # Это одиночный boolean атрибут в конце запроса
+                    conditions.append((current_attr, '=', 'true', attr_negate, contact_type, data_type))
+                    i += 1
+                    continue
+            else:
+                # Это последний токен и это boolean атрибут
+                conditions.append((current_attr, '=', 'true', attr_negate, contact_type, data_type))
+                i += 1
+                continue
+        else:
+            # Это не boolean атрибут, проверяем, идет ли дальше оператор
+            if i + 1 < len(tokens):
+                next_token = tokens[i + 1].lower()
+                # Если следующий токен - логический оператор, значит это одиночный атрибут
+                # Для не-boolean атрибутов проверяем наличие значения
+                if next_token in ['and', 'or']:
+                    conditions.append((current_attr, 'has_value', '', attr_negate, contact_type, data_type))
+                    i += 1
+                    # Добавляем логический оператор
+                    if i < len(tokens):
+                        logical_ops.append(tokens[i].lower())
+                        i += 1
+                    continue
+                # Если следующий токен - не оператор сравнения
+                elif next_token not in comparison_operators:
+                    # Это одиночный атрибут в конце или перед чем-то другим
+                    conditions.append((current_attr, 'has_value', '', attr_negate, contact_type, data_type))
+                    i += 1
+                    continue
+            else:
+                # Это последний токен и это не-boolean атрибут
+                # Проверяем наличие значения
+                conditions.append((current_attr, 'has_value', '', attr_negate, contact_type, data_type))
+                i += 1
+                continue
+        
+        # Ищем паттерн: attribute operator value
+        # Специальная обработка для between (требует два значения)
+        if i + 1 < len(tokens) and tokens[i + 1].lower() == 'between' and i + 3 < len(tokens):
+            attribute = tokens[i]
+            operator = tokens[i + 1]
+            value1 = tokens[i + 2]
+            value2 = tokens[i + 3]
+            value = f"{value1} {value2}"
+            i += 4
+            
+            # Нормализуем имя атрибута
+            normalized_attribute, attr_negate, contact_type, data_type = normalize_attribute_name(attribute, settings)
+            conditions.append((normalized_attribute, operator, value, attr_negate, contact_type, data_type))
+            
+            # Проверяем наличие логического оператора
+            if i < len(tokens) and tokens[i].lower() in ['and', 'or']:
+                logical_ops.append(tokens[i].lower())
+                i += 1
+        elif i + 2 < len(tokens):
+            attribute = tokens[i]
+            operator = tokens[i + 1]
+            
+            # Проверяем на NOT operator
+            negate = False
+            if operator.lower() == 'not':
+                negate = True
+                if i + 3 < len(tokens):
+                    operator = tokens[i + 2]
+                    value = tokens[i + 3]
+                    i += 4
+                else:
+                    i += 1
+                    continue
+            else:
+                value = tokens[i + 2]
+                i += 3
+            
+            # Нормализуем имя атрибута (преобразуем алиас в реальное имя)
+            normalized_attribute, attr_negate, contact_type, data_type = normalize_attribute_name(attribute, settings)
+            # Комбинируем инверсию от алиаса и оператора NOT
+            final_negate = negate != attr_negate  # XOR
+            conditions.append((normalized_attribute, operator, value, final_negate, contact_type, data_type))
+            
+            # Проверяем наличие логического оператора
+            if i < len(tokens) and tokens[i].lower() in ['and', 'or']:
+                logical_ops.append(tokens[i].lower())
+                i += 1
+        # Проверяем паттерн: attribute operator (без значения для boolean)
+        elif i + 1 < len(tokens):
+            attribute = tokens[i]
+            operator = tokens[i + 1]
+            
+            # Нормализуем атрибут
+            normalized_attribute, attr_negate, contact_type, data_type = normalize_attribute_name(attribute, settings)
+            
+            # Если это boolean атрибут и оператор = или is, добавляем значение true
+            if normalized_attribute in boolean_attrs and operator.lower() in ['=', 'is']:
+                conditions.append((normalized_attribute, operator, 'true', attr_negate, contact_type, data_type))
+                i += 2
+                
+                # Проверяем наличие логического оператора
+                if i < len(tokens) and tokens[i].lower() in ['and', 'or']:
+                    logical_ops.append(tokens[i].lower())
+                    i += 1
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    logger.debug(f"Созданные условия: {conditions}")
+    logger.debug(f"Логические операторы: {logical_ops}")
+    
+    # Оцениваем условия для каждого пользователя
+    for user in users:
+        if not conditions:
+            continue
+        
+        # Оцениваем первое условие
+        attr, op, val, negate, contact_type, data_type = conditions[0]
+        result_value = evaluate_condition(user, attr, op, val, contact_type, data_type)
+        if negate:
+            result_value = not result_value
+        
+        # Применяем остальные условия с логическими операторами
+        for idx, (attr, op, val, negate, contact_type, data_type) in enumerate(conditions[1:], start=0):
+            if idx < len(logical_ops):
+                logical_op = logical_ops[idx]
+                cond_result = evaluate_condition(user, attr, op, val, contact_type, data_type)
+                if negate:
+                    cond_result = not cond_result
+                
+                if logical_op == 'and':
+                    result_value = result_value and cond_result
+                elif logical_op == 'or':
+                    result_value = result_value or cond_result
+        
+        if result_value:
+            result.append(user)
+    
+    return result
 
 
 def find_users_prompt(settings: "SettingParams"):
     break_flag = False
     double_users_flag = False
 
-    print("Введите данные для поиска пользователей в формате: ID, часть логина, алиаса или фамилии пользователя (пустая строка для ВСЕХ пользователей, минус для выхода)")
-    answer = input("Искать: ")
+    print("\n=== Поиск пользователей ===")
+    print("Простой поиск: ID, часть логина, алиаса или фамилии (через пробел, запятую или точку с запятой)")
+    print("  Поддерживается wildcard (*). Примеры: iva*, *nov, *петр*")
+    print("\nСложный поиск: <атрибут> <оператор> <значение> [and|or <атрибут> <оператор> <значение>]")
+    print("  Операторы: =, is, contains, not, in, <, >, <=, >=, between")
+    print("\n  Допустимые атрибуты (и их алиасы):")
+    print("    Основные:")
+    print("      - id - ID пользователя")
+    print("      - nickname (алиас) - логин/алиас")
+    print("      - aliases (алиасы) - массив алиасов пользователя (поддержка =, contains, wildcard)")
+    print("      - name.first (first_name, имя, first) - имя")
+    print("      - name.last (last_name, фамилия, last) - фамилия")
+    print("      - name.middle (middle_name, отчество, middle) - отчество")
+    print("      - position (должность) - должность")
+    print("      - department (подразделение, ou, dep) - название подразделения (пробелы игнорируются при сравнении)")
+    print("      - departmentId - ID подразделения")
+    print("      - gender - пол")
+    print("      - language - язык")
+    print("      - timezone - часовой пояс")
+    print("      - about - информация о пользователе")
+    print("      - birthday - дата рождения")
+    print("    Атрибуты группы (поиск по всем группам пользователя):")
+    print("      - GroupName (group_name, имя_группы) - имя группы (атрибут full_groups.name)")
+    print("      - GroupAliases (group_aliases, алиасы_группы) - алиасы группы (поиск в full_groups.aliases и full_groups.label)")
+    print("      Примечание: пользователь может быть в нескольких группах, поиск проверяет все группы")
+    print("    Boolean атрибуты:")
+    print("      - isAdmin (admin, админ, is_admin) - администратор")
+    print("      - isEnabled (enabled, is_enabled) - активен")
+    print("      - blocked / заблокирован = NOT isEnabled (инверсия)")
+    print("    Контакты (поиск в структуре contacts):")
+    print("      - телефон, phone, work_phone, mobile_phone - поиск телефонов")
+    print("      - почта, mail, email - поиск email в контактах")
+    print("    Даты (с операторами <, >, <=, >=, =, between):")
+    print("      - createdAt (created, создан) - дата создания")
+    print("      - updatedAt (updated, изменен) - дата изменения")
+    print("      - isEnabledUpdatedAt (дата_блокировки) - дата блокировки")
+    print("      - Форматы дат: DD.MM.YYYY, YYYY-MM-DD, относительные (-7d, 30д, 2w, -1м)")
+    print("\n  Особенности:")
+    print("    - Для boolean атрибутов без значения = проверка на true")
+    print("    - Для не-boolean атрибутов без значения = проверка наличия значения")
+    print("    - Для массивов (aliases) операторы = и contains работают одинаково")
+    print("    - Неизвестные атрибуты будут отклонены с ошибкой")
+    print("\n  Примеры:")
+    print("    - admin              (все администраторы)")
+    print("    - blocked            (все заблокированные)")
+    print("    - middle             (все, у кого есть отчество)")
+    print("    - position           (все, у кого указана должность)")
+    print("    - aliases = test     (у кого есть алиас 'test')")
+    print("    - aliases contains *admin* (у кого есть алиас содержащий 'admin')")
+    print("    - phone contains 900 (все, у кого телефон содержит 900)")
+    print("    - email = *@gmail.com (все с gmail почтой в контактах)")
+    print("    - group_name = Admins (все пользователи, входящие в группу Admins)")
+    print("    - group_aliases contains admin (пользователи, входящие в группу с алиасом 'admin')")
+    print("    - group_name contains *dev* (пользователи групп, имя которых содержит 'dev')")
+    print("    - created > -7d      (созданные за последние 7 дней)")
+    print("    - updated < -30d     (не изменялись более 30 дней)")
+    print("    - создан between -30d -7d (созданные от 30 до 7 дней назад)")
+    print("    - enabled and admin  (активные администраторы)")
+    print("    - должность contains manager")
+    print("    - фамилия = *ов and админ")
+    print("\n(пустая строка для ВСЕХ пользователей, минус для выхода)")
+    answer = input("\nИскать: ")
 
     if answer.strip() == "-":
-        return True, double_users_flag, []
+        return True, double_users_flag, [], ""
     if not answer.strip():
-        return break_flag, double_users_flag, []
+        return break_flag, double_users_flag, [], ""
 
-    pattern = r'[;,\s]+'
-    search_users = re.split(pattern, answer)
-    users_to_add = []
-    #rus_pattern = re.compile('[-А-Яа-яЁё]+')
-    #anti_rus_pattern = r'[^\u0400-\u04FF\s]'
-
-    users = get_all_api360_users(settings, force=True)
+    users = get_extended_api360_users(settings)
     if not users:
         logger.info("No users found in Y360 organization.")
         break_flag = True
+        return break_flag, double_users_flag, [], "No users found in Y360 organization."
 
-    for searched in search_users:
-        if "@" in searched.strip():
-            searched = searched.split("@")[0]
-        found_flag = False
-        if all(char.isdigit() for char in searched.strip()):
-            if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+    # Определяем тип запроса
+    if is_complex_query(answer):
+        # Сложный поиск
+        logger.info("Обнаружен сложный запрос поиска")
+        try:
+            users_to_add = execute_complex_query(users, answer, settings)
+            if users_to_add:
+                logger.info(f"Найдено пользователей: {len(users_to_add)}")
+                for user in users_to_add:
+                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
+            else:
+                logger.error("Пользователи не найдены по заданным критериям")
+            return break_flag, double_users_flag, users_to_add, answer
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении сложного запроса: {e}")
+            return break_flag, True, [], answer
+    else:
+        # Простой поиск (существующая логика)
+        logger.info("Выполняется простой запрос поиска")
+        pattern = r'[;,\s]+'
+        search_users = re.split(pattern, answer)
+        users_to_add = []
+
+        for searched in search_users:
+            if "@" in searched.strip():
+                searched = searched.split("@")[0]
+            found_flag = False
+            
+            # Проверка на ID - wildcards не поддерживаются
+            searched_cleaned = searched.strip().replace('*', '')
+            if all(char.isdigit() for char in searched_cleaned):
+                # Если в поиске по ID используется wildcard, выводим ошибку
+                if '*' in searched.strip():
+                    logger.error(f"Wildcard (*) не может быть использован при поиске по ID: {searched}")
+                    continue
+                    
+                if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                    for user in users:
+                        if user['id'] == searched.strip():
+                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                            users_to_add.append(user)
+                            found_flag = True
+                            break
+
+            else:
+                found_last_name_user = []
                 for user in users:
-                    if user['id'] == searched.strip():
+                    aliases_lower_case = [r.lower() for r in user['aliases']]
+                    
+                    # Проверка nickname с поддержкой wildcard
+                    if wildcard_match(user['nickname'], searched.strip()):
                         logger.debug(f"User found: {user['nickname']} ({user['id']})")
                         users_to_add.append(user)
                         found_flag = True
                         break
+                    
+                    # Проверка алиасов с поддержкой wildcard
+                    for alias in aliases_lower_case:
+                        if wildcard_match(alias, searched.strip()):
+                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                            users_to_add.append(user)
+                            found_flag = True
+                            break
+                    
+                    if found_flag:
+                        break
+                    
+                    # Проверка фамилии с поддержкой wildcard
+                    if wildcard_contains(user['name']['last'], searched.strip()):
+                        found_last_name_user.append(user)
+                        
+                if not found_flag and found_last_name_user:
+                    if len(found_last_name_user) == 1:
+                        logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                        users_to_add.append(found_last_name_user[0])
+                        found_flag = True
+                    else:
+                        logger.error(f"User {searched} found more than one user:")
+                        for user in found_last_name_user:
+                            logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                        logger.error("Refine your search parameters.")
+                        double_users_flag = True
+                        break
 
-        else:
-            found_last_name_user = []
-            for user in users:
-                aliases_lower_case = [r.lower() for r in user['aliases']]
-                if user['nickname'].lower() == searched.lower().strip() or searched.lower().strip() in aliases_lower_case:
-                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
-                    users_to_add.append(user)
-                    found_flag = True
-                    break
-                if user['name']['last'].lower().startswith(searched.lower().strip()):
-                    found_last_name_user.append(user)
-            if not found_flag and found_last_name_user:
-                if len(found_last_name_user) == 1:
-                    logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
-                    users_to_add.append(found_last_name_user[0])
-                    found_flag = True
-                else:
-                    logger.error(f"User {searched} found more than one user:")
-                    for user in found_last_name_user:
-                        logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
-                    logger.error("Refine your search parameters.")
-                    double_users_flag = True
-                    break
+            if not found_flag:
+                logger.error(f"User {searched} not found in Y360 organization.")
 
-        if not found_flag:
-            logger.error(f"User {searched} not found in Y360 organization.")
-
-    return break_flag, double_users_flag, users_to_add
+        return break_flag, double_users_flag, users_to_add, answer
 
 def test_add_aliases_prompt(settings: "SettingParams"):
     """
@@ -4264,8 +5792,8 @@ def main_menu(settings: "SettingParams"):
         print("3. Анализировать входной файл для создания пользователей на ошибки.")
         print("4. Поиск подразделения по названию или алиасу.")
         print("5. Показать атрибуты пользователя.")
-        print("6. Выгрузить всех пользователей в файл.")
-        print("7. Импортировать общие ящики из файла.")
+        print("6. Выгрузить всех или выбранных пользователей в файл.")
+        print("7. Создать общие ящики из файла.")
         # print("3. Delete all contacts.")
         # print("4. Output bad records to file")
         print("0. (Ctrl+C) Выход")
@@ -4329,4 +5857,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno}: {e}")
         sys.exit(EXIT_CODE)
+    
     
