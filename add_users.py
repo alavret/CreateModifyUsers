@@ -57,6 +57,19 @@ ALL_DEPS_REFRESH_IN_MINUTES = 15
 EXTENDED_USERS_REFRESH_IN_MINUTES = 15
 ALL_USERS_REFRESH_IN_MINUTES = 15
 
+# Необходимые права доступа для работы скрипта
+NEEDED_PERMISSIONS = [
+    "directory:read_users",
+    "directory:write_users",
+    "directory:read_departments",
+    "directory:write_departments",
+    "directory:read_groups",
+    "directory:write_groups",
+    "directory:read_organization",
+    "ya360_admin:mail_read_shared_mailbox_inventory",
+    "ya360_admin:mail_read_shared_mailbox_inventory",
+]
+
 # Глобальная переменная для кэширования загруженных алиасов поисковых атрибутов
 _search_aliases_cache = None
 
@@ -2587,6 +2600,7 @@ class SettingParams:
     short_file_name_prefix : str
     short_file_dir : str
     search_aliases_file : str
+    display_users_fields_file : str
 
 def get_settings():
     exit_flag = False
@@ -2621,6 +2635,7 @@ def get_settings():
         short_file_name_prefix = os.environ.get("SHORT_FILE_NAME_PREFIX", "users"),
         short_file_dir = os.environ.get("SHORT_FILE_DIR", "."),
         search_aliases_file = os.environ.get("SEARCH_ALIASES_FILE", "search_aliases.txt"),
+        display_users_fields_file = os.environ.get("DISPLAY_USERS_IN_CONSOLE_FIELDS", "fields_spec.txt"),
     )
 
     if not settings.users_file:
@@ -2636,9 +2651,15 @@ def get_settings():
         exit_flag = True
 
     if not (oauth_token_bad or exit_flag):
-        if not check_oauth_token(settings.oauth_token, settings.org_id):
-            logger.error("OAUTH_TOKEN не является действительным")
+        hard_error, result_ok = check_token_permissions(settings.oauth_token, settings.org_id, NEEDED_PERMISSIONS)
+        if hard_error:
+            logger.error("OAUTH_TOKEN не является действительным или не имеет необходимых прав доступа")
             oauth_token_bad = True
+        if not result_ok:
+            print("ВНИМАНИЕ: Функциональность скрипта может быть ограничена. Возможны ошибки при работе с API.")
+            print("=" * 100)
+            input("Нажмите Enter для продолжения..")
+
 
     if not settings.password_pattern:
         logger.error("PASSWORD_PATTERN не установлен. Используется значение по умолчанию.")
@@ -2676,6 +2697,86 @@ def check_oauth_token(oauth_token, org_id):
     if response.status_code == HTTPStatus.OK:
         return True
     return False
+
+
+def check_token_permissions(token: str, org_id: int, needed_permissions: list) -> bool:
+    """
+    Проверяет права доступа для заданного токена.
+    
+    Args:
+        token: OAuth токен для проверки
+        org_id: ID организации
+        needed_permissions: Список необходимых прав доступа
+        
+    Returns:
+        bool: True если токен невалидный, False в противном случае, продолжение работы невозможно
+        bool: True если все права присутствуют и org_id совпадает, False в противном случае, продолжение работы возможно
+    """
+    url = 'https://api360.yandex.net/whoami'
+    headers = {
+        'Authorization': f'OAuth {token}'
+    }
+    hard_error = False
+    try:
+        response = requests.get(url, headers=headers)
+        
+        # Проверка валидности токена
+        if response.status_code != HTTPStatus.OK:
+            logger.error(f"Невалидный токен. Статус код: {response.status_code}")
+            if response.status_code == 401:
+                logger.error("Токен недействителен или истек срок его действия.")
+            else:
+                logger.error(f"Ошибка при проверке токена: {response.text}")
+            return True, False
+        
+        data = response.json()
+        
+        # Извлечение scopes и orgIds из ответа
+        token_scopes = data.get('scopes', [])
+        token_org_ids = data.get('orgIds', [])
+        login = data.get('login', 'unknown')
+        
+        logger.info(f"Проверка прав доступа для токена пользователя: {login}")
+        logger.debug(f"Доступные права: {token_scopes}")
+        logger.debug(f"Доступные организации: {token_org_ids}")
+        
+        # Проверка наличия org_id в списке доступных организаций
+        if str(org_id) not in [str(org) for org in token_org_ids]:
+            logger.error("=" * 100)
+            logger.error(f"ОШИБКА: Токен не имеет доступа к организации с ID {org_id}")
+            logger.error(f"Доступные организации для этого токена: {token_org_ids}")
+            logger.error("=" * 100)
+            return True, False
+
+        # Проверка наличия всех необходимых прав
+        missing_permissions = []
+        for permission in needed_permissions:
+            if permission not in token_scopes:
+                missing_permissions.append(permission)
+        
+        if missing_permissions:
+            logger.error("=" * 100)
+            logger.error("ОШИБКА: У токена отсутствуют необходимые права доступа!")
+            logger.error("Недостающие права:")
+            for perm in missing_permissions:
+                logger.error(f"  - {perm}")
+            logger.error("=" * 100)
+            return False, False
+
+        logger.info("✓ Все необходимые права доступа присутствуют")
+        logger.info(f"✓ Доступ к организации {org_id} подтвержден")
+        return False, True
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка при выполнении запроса к API: {e}")
+        return True, False
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка при парсинге ответа от API: {e}")
+        return True, False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при проверке прав доступа: {type(e).__name__}: {e}")
+        return True, False
+
 
 def create_user_by_api(settings: "SettingParams", user: dict):
 
@@ -3037,9 +3138,12 @@ def add_aliases_to_users(settings: "SettingParams", users_data: list):
     logger.info(f"Добавление алиасов завершено. Успешно: {success_count}, Ошибок: {failed_count}")
     return success_count, failed_count, errors
 
-def get_all_api360_departments(settings: "SettingParams", force = False):
+def get_all_api360_departments(settings: "SettingParams", force = False, show_messages = False):
     if not force:
-        logger.info("Получение всех подразделений организации из кэша...")
+        if show_messages:
+            logger.info("Получение всех подразделений организации из кэша...")
+        else:
+            logger.debug("Получение всех подразделений организации из кэша...")
     if not settings.all_deps or force or (datetime.now() - settings.all_deps_get_timestamp).total_seconds() > ALL_DEPS_REFRESH_IN_MINUTES * 60:
         settings.all_deps = get_all_api360_departments_from_api(settings)
         settings.all_deps_get_timestamp = datetime.now()
@@ -3452,8 +3556,8 @@ def generate_unique_file_name(name):
     return final_file_name
 
 
-def generate_deps_hierarchy_from_api(settings: "SettingParams", force = False):
-    all_deps_from_api = get_all_api360_departments(settings, force)
+def generate_deps_hierarchy_from_api(settings: "SettingParams", force = False, show_messages = False):
+    all_deps_from_api = get_all_api360_departments(settings, force, show_messages)
     if len(all_deps_from_api) == 1:
         #print('There are no departments in organozation! Exit.')
         return []
@@ -3645,45 +3749,52 @@ def show_user_attributes(settings: "SettingParams", answer):
         return
 
     for target_user_short in users_to_add:
-        result, target_user = get_user_by_api(settings, target_user_short["id"])
-        if not result:
-            logger.error(f"Пользователь с id: {target_user_short['id']} не найден в организации Y360.")
-            continue
-        logger.info("\n")
-        logger.info("--------------------------------------------------------")
-        logger.info(f'Атрибуты пользователя с id: {target_user["id"]}')
-        logger.info("--------------------------------------------------------")
-        for k, v in target_user.items():
-            if k.lower() == "departmentid":
-                if v == 1:
-                    logger.info("departmentId: 1")
-                    logger.info("Подразделение не указано")
-                else:
-                    department = next((d for d in departments if d['id'] == v), None)
-                    logger.info(f"departmentId: {department['id']}")
-                    logger.info(f"Department: {department['path']}")
-            elif k.lower() == "contacts":
-                logger.info("Contacts:")
-                for l in v: 
-                    for k1, v1 in l.items():  
-                        logger.info(f" - {k1}: {v1}")
-                    logger.info(" -")
-            elif k.lower() == "aliases":
-                if not v:
-                    logger.info("Aliases: []")
-                else:
-                    logger.info("Aliases:")
-                    for l in v:
-                        logger.info(f" - {l}")
-            elif k.lower() == "name":
-                logger.info("Name:")
-                for k1, v1 in v.items():  
-                    logger.info(f" - {k1}: {v1}")
-            else:
-                logger.info(f"{k}: {v}")
-        logger.info("--------------------------------------------------------")
+        show_one_user_attributes(settings, target_user_short["id"], departments)
+    return
 
-        logger.info("\n")
+def show_one_user_attributes(settings: "SettingParams", uid: str, departments: list = None, save_to_file = True):
+    result, target_user = get_user_by_api(settings, uid)
+    if departments is None:
+        departments = generate_deps_hierarchy_from_api(settings, show_messages=False)
+    if not result:
+        logger.error(f"Пользователь с id: {uid} не найден в организации Y360.")
+        return
+    logger.info("\n")
+    logger.info("--------------------------------------------------------")
+    logger.info(f'Атрибуты пользователя с id: {target_user["id"]}')
+    logger.info("--------------------------------------------------------")
+    for k, v in target_user.items():
+        if k.lower() == "departmentid":
+            if v == 1:
+                logger.info("departmentId: 1")
+                logger.info("Подразделение не указано")
+            else:
+                department = next((d for d in departments if d['id'] == v), None)
+                logger.info(f"departmentId: {department['id']}")
+                logger.info(f"Department: {department['path']}")
+        elif k.lower() == "contacts":
+            logger.info("Contacts:")
+            for l in v: 
+                for k1, v1 in l.items():  
+                    logger.info(f" - {k1}: {v1}")
+                logger.info(" -")
+        elif k.lower() == "aliases":
+            if not v:
+                logger.info("Aliases: []")
+            else:
+                logger.info("Aliases:")
+                for l in v:
+                    logger.info(f" - {l}")
+        elif k.lower() == "name":
+            logger.info("Name:")
+            for k1, v1 in v.items():  
+                logger.info(f" - {k1}: {v1}")
+        else:
+            logger.info(f"{k}: {v}")
+    logger.info("--------------------------------------------------------")
+
+    logger.info("\n")
+    if save_to_file:
         with open(f"{target_user['nickname']}.txt", "w", encoding="utf-8") as f:
             f.write(f'Атрибуты пользователя с id: {target_user["id"]}\n')
             f.write("--------------------------------------------------------\n")
@@ -4064,21 +4175,8 @@ def download_users_attrib_to_file_prompt(settings: "SettingParams"):
         print(f"\n❌ Ошибка при загрузке алиасов: {e}")
         print("Будут использованы встроенные алиасы.\n")
 
-    while True:
-
-        users_to_add = False
-
-        break_flag, double_users_flag, users_to_add, search_query = find_users_prompt(settings)
-        if break_flag:
-            break
-        
-        if double_users_flag:
-            continue
- 
-        logger.info("Выгрузка атрибутов найденных пользователей в файл.")
-        download_users_attrib_to_file(settings, users_to_add)
-        download_users_attrib_to_file_short(settings, users_to_add, search_query)
-        break
+    # Вызываем функцию поиска с внутренним циклом
+    find_users_prompt(settings)
 
 
 def wildcard_match(text: str, pattern: str) -> bool:
@@ -4407,6 +4505,16 @@ def normalize_attribute_name(attr_alias: str, settings: "SettingParams" = None) 
         'isenabledupdatedat': (None, 'date'),  # правильное имя
     }
     
+    # Маппинг для нормализации регистра ключевых атрибутов
+    case_normalization = {
+        'isadmin': 'isAdmin',
+        'isenabled': 'isEnabled',
+        'createdat': 'createdAt',
+        'updatedat': 'updatedAt',
+        'isenabledupdatedat': 'isEnabledUpdatedAt',
+        'departmentid': 'departmentId',
+    }
+    
     # Приводим к нижнему регистру для поиска
     attr_lower = attr_alias.lower().strip()
     
@@ -4417,7 +4525,9 @@ def normalize_attribute_name(attr_alias: str, settings: "SettingParams" = None) 
     # Проверяем, является ли это реальным именем атрибута
     if attr_lower in valid_real_attributes:
         contact_type, data_type = valid_real_attributes[attr_lower]
-        return (attr_alias, False, contact_type, data_type)
+        # Нормализуем регистр для ключевых атрибутов
+        normalized_attr = case_normalization.get(attr_lower, attr_alias)
+        return (normalized_attr, False, contact_type, data_type)
     
     # Атрибут не найден - возбуждаем исключение
     raise ValueError(f"Неизвестный атрибут: '{attr_alias}'. Используйте 'help' для списка допустимых атрибутов.")
@@ -4610,6 +4720,7 @@ def compare_dates(date1_str: str, operator: str, date2_str: str) -> bool:
 def get_user_attribute(user: dict, attr_path: str):
     """
     Получает значение атрибута пользователя по пути (например, name.first).
+    Поиск атрибутов выполняется без учета регистра.
     
     Args:
         user: Объект пользователя
@@ -4622,8 +4733,20 @@ def get_user_attribute(user: dict, attr_path: str):
     value = user
     
     for part in parts:
-        if isinstance(value, dict) and part in value:
-            value = value[part]
+        if isinstance(value, dict):
+            # Поиск атрибута без учета регистра
+            part_lower = part.lower()
+            found_key = None
+            
+            for key in value.keys():
+                if key.lower() == part_lower:
+                    found_key = key
+                    break
+            
+            if found_key is not None:
+                value = value[found_key]
+            else:
+                return None
         else:
             return None
     
@@ -4641,6 +4764,10 @@ def is_complex_query(query: str) -> bool:
         True если запрос сложный, иначе False
     """
     query_lower = query.lower().strip()
+    
+    # Проверяем, начинается ли запрос с оператора not
+    if query_lower.startswith('not ') or any(a for a in query_lower.split(' ') if a in ["isadmin", "isenabled"]):
+        return True
     
     # Ключевые слова сложного поиска (включая операторы сравнения дат)
     keywords = [' and ', ' or ', ' not ', ' in ', ' contains ', ' is ', '=', ' < ', ' > ', ' <= ', ' >= ', ' between ']
@@ -5245,11 +5372,11 @@ def execute_complex_query(users: list, query: str, settings: "SettingParams" = N
     return result
 
 
-def find_users_prompt(settings: "SettingParams"):
-    break_flag = False
-    double_users_flag = False
-
-    print("\n=== Поиск пользователей ===")
+def show_search_help():
+    """
+    Отображает справку по поиску пользователей.
+    """
+    print("\n=== Справка по поиску пользователей ===")
     print("Простой поиск: ID, часть логина, алиаса или фамилии (через пробел, запятую или точку с запятой)")
     print("  Поддерживается wildcard (*). Примеры: iva*, *nov, *петр*")
     print("\nСложный поиск: <атрибут> <оператор> <значение> [and|or <атрибут> <оператор> <значение>]")
@@ -5309,108 +5436,1114 @@ def find_users_prompt(settings: "SettingParams"):
     print("    - enabled and admin  (активные администраторы)")
     print("    - должность contains manager")
     print("    - фамилия = *ов and админ")
-    print("\n(пустая строка для ВСЕХ пользователей, минус для выхода)")
-    answer = input("\nИскать: ")
+    print("\nПоиск всех пользователей: * (звездочка)")
+    print("Справка: ? (вопросительный знак)")
+    print("Выход: пустая строка (Enter)")
 
-    if answer.strip() == "-":
-        return True, double_users_flag, [], ""
-    if not answer.strip():
-        return break_flag, double_users_flag, [], ""
 
-    users = get_extended_api360_users(settings)
-    if not users:
-        logger.info("No users found in Y360 organization.")
-        break_flag = True
-        return break_flag, double_users_flag, [], "No users found in Y360 organization."
-
-    # Определяем тип запроса
-    if is_complex_query(answer):
-        # Сложный поиск
-        logger.info("Обнаружен сложный запрос поиска")
-        try:
-            users_to_add = execute_complex_query(users, answer, settings)
-            if users_to_add:
-                logger.info(f"Найдено пользователей: {len(users_to_add)}")
-                for user in users_to_add:
-                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
-            else:
-                logger.error("Пользователи не найдены по заданным критериям")
-            return break_flag, double_users_flag, users_to_add, answer
-        except Exception as e:
-            logger.error(f"Ошибка при выполнении сложного запроса: {e}")
-            return break_flag, True, [], answer
-    else:
-        # Простой поиск (существующая логика)
-        logger.info("Выполняется простой запрос поиска")
-        pattern = r'[;,\s]+'
-        search_users = re.split(pattern, answer)
-        users_to_add = []
-
-        for searched in search_users:
-            if "@" in searched.strip():
-                searched = searched.split("@")[0]
-            found_flag = False
+def display_users_list(users_list, rows_per_page=20, page_number=1, sort_field='nickname', sort_order='asc', fields_config=None):
+    """
+    Отображает список пользователей в консоли с поддержкой пагинации, сортировки и настройки колонок.
+    
+    Args:
+        users_list: Список пользователей для отображения
+        rows_per_page: Количество строк на одной странице (по умолчанию 20)
+        page_number: Номер страницы для отображения (по умолчанию 1)
+        sort_field: Поле для сортировки (по умолчанию 'nickname')
+                   Поддерживаются вложенные поля через точку, например 'name.first', 'name.last'
+        sort_order: Порядок сортировки - 'asc' или 'desc' (по умолчанию 'asc')
+        fields_config: Список полей для отображения в формате ['поле:заголовок:ширина:порядок', ...]
+                      По умолчанию ['nickname:Логин:15:1', 'name.first:Имя:15:2', 'name.last:Фамилия:15:3', 'isAdmin:Админ:8:4', 'isEnabled:Активен:9:5']
+                      Форматы:
+                      - имя_поля:ширина:порядок (без заголовка, используется имя поля)
+                      - имя_поля:заголовок:ширина:порядок (с заголовком)
+                      - Если ширина меньше длины заголовка, используется длина заголовка
+                      - Порядок определяет позицию колонки (можно опустить)
+                      - Если значение не помещается в колонку, оно обрезается, последний символ заменяется на '…'
+                      - Нулевая колонка "№" добавляется автоматически с порядковым номером
+    
+    Returns:
+        None
+    
+    Примеры использования:
+        # Отображение первой страницы с настройками по умолчанию
+        display_users_list(users_to_add)
+        
+        # Отображение второй страницы с 10 строками, сортировка по фамилии
+        display_users_list(users_to_add, rows_per_page=10, page_number=2, sort_field='name.last')
+        
+        # Сортировка по имени в обратном порядке
+        display_users_list(users_to_add, sort_field='name.first', sort_order='desc')
+        
+        # Настройка отображаемых полей с указанием порядка (старый формат без заголовков)
+        custom_fields = ['nickname:20:1', 'name.last:20:2', 'department:30:3', 'position:25:4']
+        display_users_list(users_to_add, fields_config=custom_fields)
+        
+        # Настройка полей с пользовательскими заголовками (новый формат)
+        custom_fields = ['nickname:Логин:20:1', 'name.last:Фамилия:20:2', 'department:Отдел:30:3', 'position:Должность:25:4']
+        display_users_list(users_to_add, fields_config=custom_fields)
+        
+        # Показать всех пользователей на одной странице
+        display_users_list(users_to_add, rows_per_page=1000)
+    """
+    if not users_list:
+        print("Список пользователей пуст.")
+        return
+    
+    # Настройка полей по умолчанию
+    if fields_config is None:
+        fields_config = ['nickname:Логин:15:1', 'name.first:Имя:15:2', 'name.last:Фамилия:15:3', 'isAdmin:Админ:8:4', 'isEnabled:Активен:9:5']
+    
+    # Парсинг конфигурации полей
+    fields = []
+    for idx, field_config in enumerate(fields_config):
+        parts = field_config.split(':')
+        if len(parts) >= 2:
+            field_name = parts[0]
+            field_header = None
+            field_width = None
+            field_order = idx + 1
             
-            # Проверка на ID - wildcards не поддерживаются
-            searched_cleaned = searched.strip().replace('*', '')
-            if all(char.isdigit() for char in searched_cleaned):
-                # Если в поиске по ID используется wildcard, выводим ошибку
-                if '*' in searched.strip():
-                    logger.error(f"Wildcard (*) не может быть использован при поиске по ID: {searched}")
-                    continue
-                    
-                if len(searched.strip()) == 16 and searched.strip().startswith("113"):
-                    for user in users:
-                        if user['id'] == searched.strip():
-                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
-                            users_to_add.append(user)
-                            found_flag = True
-                            break
-
-            else:
-                found_last_name_user = []
-                for user in users:
-                    aliases_lower_case = [r.lower() for r in user['aliases']]
-                    
-                    # Проверка nickname с поддержкой wildcard
-                    if wildcard_match(user['nickname'], searched.strip()):
-                        logger.debug(f"User found: {user['nickname']} ({user['id']})")
-                        users_to_add.append(user)
-                        found_flag = True
-                        break
-                    
-                    # Проверка алиасов с поддержкой wildcard
-                    for alias in aliases_lower_case:
-                        if wildcard_match(alias, searched.strip()):
-                            logger.debug(f"User found: {user['nickname']} ({user['id']})")
-                            users_to_add.append(user)
-                            found_flag = True
-                            break
-                    
-                    if found_flag:
-                        break
-                    
-                    # Проверка фамилии с поддержкой wildcard
-                    if wildcard_contains(user['name']['last'], searched.strip()):
-                        found_last_name_user.append(user)
-                        
-                if not found_flag and found_last_name_user:
-                    if len(found_last_name_user) == 1:
-                        logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
-                        users_to_add.append(found_last_name_user[0])
-                        found_flag = True
+            try:
+                # Определяем формат: старый (поле:ширина:порядок) или новый (поле:заголовок:ширина:порядок)
+                # Проверяем, является ли второй элемент числом
+                try:
+                    # Пытаемся преобразовать второй элемент в число
+                    field_width = int(parts[1])
+                    # Если успешно, это старый формат: поле:ширина[:порядок]
+                    field_header = field_name  # Используем имя поля как заголовок
+                    if len(parts) >= 3:
+                        field_order = int(parts[2])
+                except ValueError:
+                    # Второй элемент не число, это новый формат: поле:заголовок:ширина[:порядок]
+                    if len(parts) >= 3:
+                        field_header = parts[1]
+                        field_width = int(parts[2])
+                        if len(parts) >= 4:
+                            field_order = int(parts[3])
                     else:
-                        logger.error(f"User {searched} found more than one user:")
-                        for user in found_last_name_user:
-                            logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
-                        logger.error("Refine your search parameters.")
-                        double_users_flag = True
+                        logger.warning(f"Некорректный формат поля: {field_config}. В формате с заголовком нужно минимум 3 части: 'имя:заголовок:ширина'.")
+                        continue
+                
+                # Если ширина меньше длины заголовка, используем длину заголовка
+                field_width = max(field_width, len(field_header))
+                
+                fields.append({
+                    'name': field_name,
+                    'header': field_header,
+                    'width': field_width,
+                    'order': field_order
+                })
+            except ValueError as e:
+                logger.warning(f"Некорректная конфигурация поля: {field_config}. Ошибка: {e}")
+        else:
+            logger.warning(f"Некорректный формат поля: {field_config}. Ожидается 'имя:ширина[:порядок]' или 'имя:заголовок:ширина[:порядок]'.")
+    
+    if not fields:
+        print("Не указаны поля для отображения.")
+        return
+    
+    # Сортировка полей по порядку
+    fields.sort(key=lambda f: f['order'])
+    
+    # Функция для получения значения вложенного поля
+    def get_nested_value(obj, field_path):
+        """Получает значение вложенного поля, например 'name.first'"""
+        keys = field_path.split('.')
+        value = obj
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key, '')
+            else:
+                return ''
+        return value if value is not None else ''
+    
+    # Функция для получения значения для сортировки
+    def get_sort_value(user):
+        value = get_nested_value(user, sort_field)
+        # Преобразуем значение для корректной сортировки
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, str):
+            return value.lower()
+        return value if value is not None else ''
+    
+    # Сортировка списка пользователей
+    try:
+        sorted_users = sorted(users_list, key=get_sort_value, reverse=(sort_order.lower() == 'desc'))
+    except Exception as e:
+        logger.error(f"Ошибка при сортировке по полю '{sort_field}': {e}")
+        sorted_users = users_list
+    
+    # Расчет пагинации
+    total_users = len(sorted_users)
+    total_pages = (total_users + rows_per_page - 1) // rows_per_page  # Округление вверх
+    
+    # Проверка корректности номера страницы
+    if page_number < 1:
+        page_number = 1
+    elif page_number > total_pages:
+        page_number = total_pages if total_pages > 0 else 1
+    
+    # Определение диапазона пользователей для текущей страницы
+    start_idx = (page_number - 1) * rows_per_page
+    end_idx = min(start_idx + rows_per_page, total_users)
+    page_users = sorted_users[start_idx:end_idx]
+    
+    # Функция для обрезки текста с добавлением многоточия
+    def truncate_text(text, width):
+        """Обрезает текст до указанной ширины, заменяя последний символ на '…' если необходимо"""
+        text_str = str(text)
+        if len(text_str) <= width:
+            return text_str.ljust(width)
+        else:
+            return text_str[:width-1] + '…'
+    
+    # Расчет ширины колонки с номерами (минимум 3 символа для "№")
+    max_number = start_idx + len(page_users)
+    number_width = max(3, len(str(max_number)))
+    
+    # Построение заголовка таблицы
+    header_parts = ['№'.ljust(number_width)]  # Нулевая колонка с порядковым номером
+    separator_parts = ['-' * number_width]
+    
+    for field in fields:
+        header_parts.append(field['header'].ljust(field['width']))
+        separator_parts.append('-' * field['width'])
+    
+    header_line = ' | '.join(header_parts)
+    separator_line = '-+-'.join(separator_parts)
+    
+    # Вычисление общей ширины таблицы
+    # Ширина = ширина колонки с номерами + ширины всех полей + разделители " | "
+    table_width = number_width + sum(field['width'] for field in fields) + 3 * len(fields)
+    
+    # Вывод информации о пагинации
+    print(f"\n{'='*table_width}")
+    print(f"Страница {page_number} из {total_pages} | Всего пользователей: {total_users} | Сортировка: {sort_field} ({sort_order})")
+    print(f"{'='*table_width}")
+    
+    # Вывод заголовка
+    print(header_line)
+    print(separator_line)
+    
+    # Вывод строк пользователей
+    for idx, user in enumerate(page_users, start=start_idx + 1):
+        # Порядковый номер в нулевой колонке
+        row_parts = [str(idx).ljust(number_width)]
+        
+        for field in fields:
+            value = get_nested_value(user, field['name'])
+            
+            # Форматирование булевых значений
+            if isinstance(value, bool):
+                value = 'Да' if value else 'Нет'
+            
+            # Обрезка и форматирование значения
+            formatted_value = truncate_text(value, field['width'])
+            row_parts.append(formatted_value)
+        
+        row_line = ' | '.join(row_parts)
+        print(row_line)
+    
+    # Вывод информации о диапазоне
+    print(f"{'='*table_width}")
+    print(f"Показаны пользователи {start_idx + 1}-{end_idx} из {total_users}")
+    print(f"{'='*table_width}\n")
+
+
+def load_fields_config_from_file(filename):
+    """
+    Загружает конфигурацию полей для отображения из файла.
+    
+    Args:
+        filename: Имя файла с конфигурацией
+    
+    Returns:
+        Список конфигураций полей в формате ['поле:заголовок:ширина:порядок', ...]
+        или None если файл не существует или пуст
+    
+    Формат файла:
+        Каждая строка содержит спецификацию одного поля в одном из форматов:
+        - поле
+        - поле:ширина
+        - поле:ширина:порядок
+        - поле:заголовок:ширина
+        - поле:заголовок:ширина:порядок
+        
+        Пустые строки и строки начинающиеся с # игнорируются
+    
+    Пример содержимого файла fields_spec.txt:
+        # Основные поля пользователя
+        nickname:Логин:15:1
+        name.first:Имя:15:2
+        name.last:Фамилия:15:3
+        isAdmin:Админ:8:4
+        isEnabled:Активен:9:5
+        # Дополнительные поля
+        email:25
+        department:Отдел:30
+    """
+    try:
+        if not os.path.exists(filename):
+            logger.debug(f"Файл конфигурации полей '{filename}' не найден. Используются настройки по умолчанию.")
+            return None
+        
+        fields_config = []
+        with open(filename, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, start=1):
+                line = line.strip()
+                
+                # Пропускаем пустые строки и комментарии
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Добавляем строку как есть, парсинг будет выполнен позже
+                fields_config.append(line)
+        
+        if not fields_config:
+            logger.debug(f"Файл конфигурации полей '{filename}' пуст. Используются настройки по умолчанию.")
+            return None
+        
+        logger.info(f"Загружено {len(fields_config)} полей из файла '{filename}'")
+        return fields_config
+    
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке конфигурации полей из файла '{filename}': {e}")
+        return None
+
+
+def save_fields_config_to_file(filename, fields_config):
+    """
+    Сохраняет конфигурацию полей в файл.
+    Проверяет, отличается ли новая конфигурация от существующей незакомментированной.
+    Если конфигурация идентична - сохранение отменяется.
+    Если есть отличия - существующие незакомментированные строки закомментируются,
+    новые поля добавляются в конец файла.
+    
+    Args:
+        filename: Имя файла с конфигурацией
+        fields_config: Список конфигураций полей в формате ['поле:заголовок:ширина:порядок', ...]
+    
+    Returns:
+        True если сохранение успешно, False если сохранение не требуется или произошла ошибка
+    """
+    try:
+        import datetime
+        
+        # Читаем существующий файл (если есть)
+        existing_lines = []
+        existing_active_fields = []  # Незакомментированные поля из файла
+        
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    existing_lines = f.readlines()
+                    
+                # Извлекаем незакомментированные поля
+                for line in existing_lines:
+                    stripped = line.strip()
+                    # Если строка не пустая и не является комментарием
+                    if stripped and not stripped.startswith('#'):
+                        existing_active_fields.append(stripped)
+            except Exception as e:
+                logger.warning(f"Не удалось прочитать существующий файл '{filename}': {e}")
+        
+        # Проверяем, совпадает ли новая конфигурация с существующей
+        if existing_active_fields:
+            # Нормализуем списки для сравнения (убираем лишние пробелы)
+            existing_normalized = [field.strip() for field in existing_active_fields]
+            new_normalized = [field.strip() for field in fields_config]
+            
+            # Сравниваем списки (порядок и содержимое)
+            if existing_normalized == new_normalized:
+                logger.info("Конфигурация полей не изменилась. Сохранение отменено.")
+                return False
+        
+        # Конфигурация отличается или файл пустой - продолжаем сохранение
+        logger.info("Обнаружены изменения в конфигурации полей. Сохранение...")
+        
+        # Формируем новое содержимое
+        new_content = []
+        
+        # Обрабатываем существующие строки
+        for line in existing_lines:
+            stripped = line.strip()
+            # Если строка не пустая и не является комментарием, закомментируем её
+            if stripped and not stripped.startswith('#'):
+                new_content.append(f"# {line.rstrip()}\n")
+            else:
+                # Пустые строки и комментарии оставляем как есть
+                new_content.append(line)
+        
+        # Добавляем разделитель и новые поля
+        if new_content:
+            new_content.append("\n")
+        else:
+            # Если файл создаётся впервые, добавляем заголовок с описанием
+            new_content.append("# Конфигурация полей для отображения списка пользователей\n")
+            new_content.append("# Формат: поле:заголовок:ширина:позиция\n")
+            new_content.append("# Пустые строки и строки начинающиеся с # игнорируются\n")
+            new_content.append("\n")
+        
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_content.append(f"# Сохранено: {timestamp}\n")
+        
+        # Добавляем новые поля
+        for field in fields_config:
+            new_content.append(f"{field}\n")
+        
+        # Записываем в файл
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        
+        logger.info(f"Конфигурация полей ({len(fields_config)} полей) сохранена в файл '{filename}'")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении конфигурации полей в файл '{filename}': {e}")
+        return False
+
+
+def interactive_display_users(users_list, settings=None, rows_per_page=20, sort_field='nickname', sort_order='asc', fields_config=None):
+    """
+    Интерактивная функция-обёртка для управления отображением списка пользователей.
+    
+    Поддерживает команды для навигации, сортировки и настройки отображения.
+    Команды можно вводить полностью или используя первые буквы ключевых слов.
+    
+    Конфигурация полей загружается с приоритетом:
+    1. Из файла (по умолчанию fields_spec.txt, задаётся параметром DISPLAY_USERS_IN_CONSOLE_FIELDS в .env)
+    2. Из параметра fields_config (если передан)
+    3. Значения по умолчанию
+    
+    Args:
+        users_list: Список пользователей для отображения
+        settings: Объект настроек SettingParams (необходим для команды attrib)
+        rows_per_page: Начальное количество строк на странице (по умолчанию 20)
+        sort_field: Начальное поле для сортировки (по умолчанию 'nickname')
+        sort_order: Начальный порядок сортировки - 'asc' или 'desc' (по умолчанию 'asc')
+        fields_config: Начальная конфигурация полей для отображения (используется только если нет файла)
+    
+    Команды (полные и сокращённые):
+        ?                                        - Справка (показать все команды и доступные поля)
+        page <номер> (p <номер>)                 - Переход на страницу с указанным номером
+        page size <размер> (p s <размер>)        - Установить размер страницы
+        order by <поле> asc/desc (o b ...)       - Сортировка по указанному полю (asc по умолчанию)
+        field add <поле> (f a <поле>)            - Добавить поле для вывода
+        field del <имя> (f d <имя>)              - Удалить поле из списка
+        attrib <номер> (a <номер>)               - Показать атрибуты пользователя по порядковому номеру
+        w, ц, +                                  - Следующая страница
+        s, ы, -                                  - Предыдущая страница
+        Enter (пустая строка)                    - Выход из режима отображения
+    
+    Форматы команды field add:
+        f a email               -> Добавить поле email (ширина 15, в конце списка)
+        f a email:25            -> Добавить поле email шириной 25 (в конце списка)
+        f a email:Email:25      -> Добавить поле email с заголовком Email шириной 25 (в конце)
+        f a email:Email:25:6    -> Добавить поле email с заголовком Email шириной 25 на позицию 6
+    
+    Примеры других команд:
+        p s 10                  -> page size 10
+        p 2                     -> page 2
+        o b nickname            -> order by nickname
+        f d email               -> field del email
+        a 5                     -> attrib 5
+    """
+    if not users_list:
+        print("Список пользователей пуст.")
+        return
+    
+    # Загрузка конфигурации полей из файла (если доступен)
+    # Получаем имя файла из settings или используем значение по умолчанию
+    fields_file = settings.display_users_fields_file if settings else "fields_spec.txt"
+    loaded_fields_config = load_fields_config_from_file(fields_file)
+    
+    # Инициализация параметров
+    current_page = 1
+    current_rows_per_page = rows_per_page
+    current_sort_field = sort_field
+    current_sort_order = sort_order
+    
+    # Определяем конфигурацию полей с приоритетом:
+    # 1. Загруженная из файла
+    # 2. Переданная в параметре fields_config
+    # 3. Значения по умолчанию
+    if loaded_fields_config is not None:
+        current_fields_config = loaded_fields_config
+        logger.debug(f"Используется конфигурация полей из файла ({len(loaded_fields_config)} полей)")
+    elif fields_config is not None:
+        current_fields_config = fields_config
+        logger.debug("Используется конфигурация полей из параметра функции")
+    else:
+        current_fields_config = ['nickname:Логин:15:1', 'name.first:Имя:15:2', 'name.last:Фамилия:15:3', 'isAdmin:Админ:8:4', 'isEnabled:Активен:9:5']
+        logger.debug("Используется конфигурация полей по умолчанию")
+    
+    # Вывод справки при первом входе
+    help_width = 80
+    print("\n" + "="*help_width)
+    print("ИНТЕРАКТИВНЫЙ РЕЖИМ ПРОСМОТРА ПОЛЬЗОВАТЕЛЕЙ")
+    print("="*help_width)
+    
+    # Информация об источнике конфигурации
+    if loaded_fields_config is not None:
+        print(f"\n📄 Конфигурация полей загружена из файла: {fields_file}")
+    else:
+        print(f"\n📄 Используются поля по умолчанию (файл {fields_file} не найден)")
+    
+    print("\nДоступные команды:")
+    print("  ?                                             - Справка (все команды и поля)")
+    print("  page <номер>     (или p <номер>)              - Переход на страницу")
+    print("  page size <размер> (или p s <размер>)         - Установить размер страницы")
+    print("  order by <поле> asc/desc (или o b ...)        - Сортировка по полю")
+    print("  field add <поле> (или f a <поле>)             - Добавить поле (ширина 15)")
+    print("  field del <имя> (или f d <имя>)               - Удалить поле")
+    print("  attrib <номер> (или a <номер>)                - Атрибуты пользователя")
+    print("  w, ц, +                                       - Следующая страница")
+    print("  s, ы, -                                       - Предыдущая страница")
+    print("  Enter (пустая строка)                         - Выход")
+    print("\n  💡 Можно использовать первые буквы команд (p s 10 вместо page size 10)")
+    print("  💡 Форматы field add:")
+    print("     - email              (ширина 15, в конце)")
+    print("     - email:25           (ширина 25, в конце)")
+    print("     - email:Email:25     (с заголовком, в конце)")
+    print("     - email:Email:25:6   (с заголовком, позиция 6)")
+    print(f"  💡 Для сохранения полей создайте файл {fields_file}")
+    print("="*help_width + "\n")
+    
+    # Вычисляем общее количество страниц
+    def get_total_pages():
+        return max(1, (len(users_list) + current_rows_per_page - 1) // current_rows_per_page)
+    
+    # Функция для нормализации команды (преобразование сокращений в полные команды)
+    def normalize_command(cmd):
+        """
+        Преобразует сокращённые команды в полные.
+        Например: 'p s 10' -> 'page size 10', 'o b nickname' -> 'order by nickname'
+        """
+        parts = cmd.split()
+        if len(parts) == 0:
+            return cmd
+        
+        # Словарь сокращений для первого слова
+        first_word_abbreviations = {
+            'p': 'page',
+            'o': 'order',
+            'f': 'field',
+            'a': 'attrib'
+        }
+        
+        # Словарь сокращений для второго слова (зависит от первого слова)
+        second_word_abbreviations = {
+            'page': {'s': 'size'},
+            'order': {'b': 'by'},
+            'field': {'a': 'add', 'd': 'del'}
+        }
+        
+        # Проверяем первое слово
+        first_word = parts[0].lower()
+        if first_word in first_word_abbreviations:
+            parts[0] = first_word_abbreviations[first_word]
+        
+        # Проверяем второе слово (если есть) в контексте первого
+        if len(parts) >= 2:
+            first_normalized = parts[0].lower()
+            second_word = parts[1].lower()
+            
+            if first_normalized in second_word_abbreviations:
+                if second_word in second_word_abbreviations[first_normalized]:
+                    parts[1] = second_word_abbreviations[first_normalized][second_word]
+        
+        return ' '.join(parts)
+    
+    # Функция для проверки существования поля в данных пользователей
+    def check_field_exists(field_name):
+        """
+        Проверяет, существует ли поле в данных пользователей.
+        Возвращает (exists, found_in_count, actual_field_name) где:
+        - exists: True если поле найдено хотя бы у одного пользователя
+        - found_in_count: количество пользователей, у которых найдено поле
+        - actual_field_name: имя поля как оно записано в словаре users_list (или None если не найдено)
+        
+        Сравнение выполняется без учета регистра.
+        """
+        if not users_list:
+            return False, 0, None
+        
+        def get_nested_value_case_insensitive(obj, field_path):
+            """
+            Получает значение вложенного поля, например 'name.first'
+            Сравнение выполняется без учета регистра.
+            Возвращает (value, actual_path) где actual_path - путь с оригинальными именами полей
+            """
+            keys = field_path.split('.')
+            value = obj
+            actual_keys = []
+            
+            for key in keys:
+                if isinstance(value, dict):
+                    # Ищем ключ без учета регистра
+                    found_key = None
+                    key_lower = key.lower()
+                    for dict_key in value.keys():
+                        if dict_key.lower() == key_lower:
+                            found_key = dict_key
+                            break
+                    
+                    if found_key:
+                        actual_keys.append(found_key)
+                        value = value[found_key]
+                    else:
+                        return None, None
+                else:
+                    return None, None
+            
+            actual_path = '.'.join(actual_keys)
+            return value, actual_path
+        
+        found_count = 0
+        actual_field_name = None
+        
+        for user in users_list:
+            value, found_field_name = get_nested_value_case_insensitive(user, field_name)
+            if value is not None:
+                found_count += 1
+                # Сохраняем имя поля как оно записано в словаре
+                if actual_field_name is None:
+                    actual_field_name = found_field_name
+        
+        return found_count > 0, found_count, actual_field_name
+    
+    # Функция для получения отсортированного списка пользователей
+    def get_sorted_users():
+        """Получает отсортированный список пользователей согласно текущим настройкам"""
+        def get_nested_value(obj, field_path):
+            """Получает значение вложенного поля, например 'name.first'"""
+            keys = field_path.split('.')
+            value = obj
+            for key in keys:
+                if isinstance(value, dict):
+                    value = value.get(key, '')
+                else:
+                    return ''
+            return value if value is not None else ''
+        
+        def get_sort_value(user):
+            value = get_nested_value(user, current_sort_field)
+            # Преобразуем значение для корректной сортировки
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, str):
+                return value.lower()
+            return value if value is not None else ''
+        
+        try:
+            return sorted(users_list, key=get_sort_value, reverse=(current_sort_order.lower() == 'desc'))
+        except Exception as e:
+            logger.error(f"Ошибка при сортировке по полю '{current_sort_field}': {e}")
+            return users_list
+    
+    # Основной цикл
+    while True:
+        # Отображение текущей страницы
+        display_users_list(
+            users_list,
+            rows_per_page=current_rows_per_page,
+            page_number=current_page,
+            sort_field=current_sort_field,
+            sort_order=current_sort_order,
+            fields_config=current_fields_config
+        )
+        
+        # Запрос команды от пользователя
+        try:
+            command = input("Команда: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nВыход из режима просмотра.")
+            # Сохранение конфигурации полей перед выходом
+            save_result = save_fields_config_to_file(fields_file, current_fields_config)
+            if save_result:
+                print(f"✓ Конфигурация полей сохранена в файл: {fields_file}")
+            else:
+                print("ℹ️  Конфигурация полей не изменилась")
+            break
+        
+        # Пустая строка - выход
+        if not command:
+            print("Выход из режима просмотра.")
+            # Сохранение конфигурации полей перед выходом
+            save_result = save_fields_config_to_file(fields_file, current_fields_config)
+            if save_result:
+                print(f"✓ Конфигурация полей сохранена в файл: {fields_file}")
+            else:
+                print("ℹ️  Конфигурация полей не изменилась")
+            break
+        
+        # Команда справки
+        if command == '?':
+            help_width = 80
+            print("\n" + "="*help_width)
+            print("СПРАВКА ПО КОМАНДАМ")
+            print("="*help_width)
+            
+            print("\nДоступные команды:")
+            print("  ?                                             - Показать эту справку")
+            print("  page <номер>     (или p <номер>)              - Переход на страницу")
+            print("  page size <размер> (или p s <размер>)         - Установить размер страницы")
+            print("  order by <поле> asc/desc (или o b ...)        - Сортировка по полю")
+            print("  field add <поле> (или f a <поле>)             - Добавить поле (ширина 15)")
+            print("  field del <имя> (или f d <имя>)               - Удалить поле")
+            print("  attrib <номер> (или a <номер>)                - Атрибуты пользователя")
+            print("  w, ц, +                                       - Следующая страница")
+            print("  s, ы, -                                       - Предыдущая страница")
+            print("  Enter (пустая строка)                         - Выход")
+            
+            print("\n  💡 Можно использовать первые буквы команд (p s 10 вместо page size 10)")
+            print("  💡 Форматы field add:")
+            print("     - email              (ширина 15, в конце)")
+            print("     - email:25           (ширина 25, в конце)")
+            print("     - email:Email:25     (с заголовком, в конце)")
+            print("     - email:Email:25:6   (с заголовком, позиция 6)")
+            print(f"  💡 Для сохранения полей создайте файл {fields_file}")
+            
+            # Сбор всех доступных полей из users_list
+            def collect_all_fields(users_list):
+                """Собирает все уникальные поля (включая вложенные) из списка пользователей"""
+                all_fields = set()
+                
+                def collect_fields_recursive(obj, prefix=''):
+                    """Рекурсивно собирает поля из объекта"""
+                    if isinstance(obj, dict):
+                        for key, value in obj.items():
+                            field_path = f"{prefix}.{key}" if prefix else key
+                            all_fields.add(field_path)
+                            
+                            # Если значение - словарь, рекурсивно обходим его
+                            if isinstance(value, dict):
+                                collect_fields_recursive(value, field_path)
+                            # Если значение - список словарей, обходим первый элемент
+                            elif isinstance(value, list) and value and isinstance(value[0], dict):
+                                collect_fields_recursive(value[0], field_path)
+                
+                # Собираем поля из всех пользователей
+                for user in users_list:
+                    collect_fields_recursive(user)
+                
+                return sorted(all_fields)
+            
+            available_fields = collect_all_fields(users_list)
+            
+            # Проверяем наличие поля isEnabledUpdatedAt и добавляем, если его нет
+            if 'isEnabledUpdatedAt' not in available_fields:
+                available_fields.append('isEnabledUpdatedAt')
+                available_fields.sort()
+            
+            print("\n" + "="*help_width)
+            print("ДОСТУПНЫЕ ПОЛЯ ДЛЯ ИСПОЛЬЗОВАНИЯ")
+            print("="*help_width)
+            print("\nВсе поля можно использовать в командах order by и field add:")
+            print()
+            for field in available_fields:
+                print(f"  - {field}")
+            
+            print("\n" + "="*help_width)
+            print("Нажмите Enter для продолжения...")
+            input()
+            continue
+        
+        # Команды навигации по страницам (одиночные символы) - проверяются ДО нормализации
+        if command in ['s', 'ы', '-']:
+            # Следующая страница
+            total_pages = get_total_pages()
+            if current_page < total_pages:
+                current_page += 1
+            else:
+                print(f"⚠️  Вы уже на последней странице ({total_pages}).")
+            continue
+        
+        elif command in ['w', 'ц', '+']:
+            # Предыдущая страница
+            if current_page > 1:
+                current_page -= 1
+            else:
+                print("⚠️  Вы уже на первой странице.")
+            continue
+        
+        # Нормализация команды (преобразование сокращений в полные команды)
+        command = normalize_command(command)
+        
+        # Обработка команд
+        command_lower = command.lower()
+        
+        # Команда: page size <размер> (проверяется ПЕРЕД командой page)
+        if command_lower.startswith('page size '):
+            parts = command.split()
+            if len(parts) == 3 and parts[2].isdigit():
+                size = int(parts[2])
+                if size > 0:
+                    current_rows_per_page = size
+                    current_page = 1  # Сброс на первую страницу
+                    print(f"✓ Установлен размер страницы: {size}")
+                else:
+                    print("⚠️  Размер страницы должен быть больше 0")
+            else:
+                print("⚠️  Использование: page size <размер>")
+            continue
+        
+        # Команда: page <номер>
+        if command_lower.startswith('page '):
+            parts = command.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                page_num = int(parts[1])
+                total_pages = get_total_pages()
+                if 1 <= page_num <= total_pages:
+                    current_page = page_num
+                    print(f"✓ Переход на страницу {page_num}")
+                else:
+                    print(f"⚠️  Некорректный номер страницы. Доступны страницы: 1-{total_pages}")
+            else:
+                print("⚠️  Использование: page <номер>")
+            continue
+        
+        # Команда: order by <поле> [asc|desc]
+        if command_lower.startswith('order by '):
+            parts = command.split(maxsplit=2)
+            if len(parts) >= 3:
+                field_and_order = parts[2].split()
+                field = field_and_order[0]
+                order = field_and_order[1].lower() if len(field_and_order) > 1 else 'asc'
+                
+                if order not in ['asc', 'desc']:
+                    print("⚠️  Порядок сортировки должен быть 'asc' или 'desc'")
+                else:
+                    # Проверяем существование поля с учетом регистра
+                    field_exists, found_count, actual_field_name = check_field_exists(field)
+                    
+                    if not field_exists:
+                        print(f"⚠️  Поле '{field}' не найдено в данных пользователей")
+                    else:
+                        # Используем имя поля как оно записано в словаре users_list
+                        current_sort_field = actual_field_name
+                        current_sort_order = order
+                        current_page = 1  # Сброс на первую страницу
+                        print(f"✓ Установлена сортировка: {actual_field_name} ({order})")
+            else:
+                print("⚠️  Использование: order by <поле> [asc|desc]")
+            continue
+        
+        # Команда: field add <поле[:заголовок][:ширина][:порядок]>
+        if command_lower.startswith('field add '):
+            parts = command.split(maxsplit=2)
+            if len(parts) == 3:
+                field_spec = parts[2]
+                field_parts = field_spec.split(':')
+                
+                if len(field_parts) >= 1:
+                    try:
+                        field_name = field_parts[0]
+                        field_header = None
+                        field_width = None
+                        field_order = len(current_fields_config) + 1
+                        
+                        # Определяем формат на основе количества частей
+                        if len(field_parts) == 1:
+                            # Формат: поле
+                            # Используем значения по умолчанию
+                            field_header = field_name
+                            field_width = 15
+                        elif len(field_parts) == 2:
+                            # Пытаемся определить формат: поле:ширина
+                            try:
+                                field_width = int(field_parts[1])
+                                field_header = field_name
+                            except ValueError:
+                                print("⚠️  Некорректный формат. Второй параметр должен быть числом (ширина).")
+                                print("⚠️  Использование: field add <поле> или <поле:ширина> или <поле:заголовок:ширина>")
+                                continue
+                        elif len(field_parts) == 3:
+                            # Формат: поле:ширина:порядок или поле:заголовок:ширина
+                            try:
+                                field_width = int(field_parts[1])
+                                # Если успешно, это формат: поле:ширина:порядок
+                                field_header = field_name
+                                field_order = int(field_parts[2])
+                            except ValueError:
+                                # Второй элемент не число, это формат: поле:заголовок:ширина
+                                field_header = field_parts[1]
+                                field_width = int(field_parts[2])
+                        elif len(field_parts) == 4:
+                            # Формат: поле:заголовок:ширина:порядок
+                            field_header = field_parts[1]
+                            field_width = int(field_parts[2])
+                            field_order = int(field_parts[3])
+                        else:
+                            print("⚠️  Слишком много параметров.")
+                            print("⚠️  Использование: field add <поле> или <поле:ширина> или <поле:заголовок:ширина[:порядок]>")
+                            continue
+                        
+                        # Проверка существования поля в данных пользователей
+                        field_exists, found_count, actual_field_name = check_field_exists(field_name)
+                        
+                        if not field_exists:
+                            print(f"⚠️  Поле '{field_name}' не найдено в данных пользователей и не будет добавлено.")
+                        else:
+                            # Поиск поля с учетом регистра в текущей конфигурации
+                            # Если поле уже есть, удаляем его перед добавлением с новыми параметрами
+                            field_name_lower = actual_field_name.lower()
+                            existing_field_name = None
+                            
+                            for field_config in current_fields_config:
+                                config_field_name = field_config.split(':')[0]
+                                if config_field_name.lower() == field_name_lower:
+                                    existing_field_name = config_field_name
+                                    break
+                            
+                            if existing_field_name:
+                                # Удаляем существующее поле
+                                current_fields_config = [f for f in current_fields_config if f.split(':')[0] != existing_field_name]
+                                print(f"⚠️  Поле '{existing_field_name}' уже существовало и будет обновлено")
+                            
+                            # Используем имя поля как оно записано в словаре users_list
+                            # Формируем строку конфигурации в зависимости от наличия заголовка
+                            if field_header == field_name:
+                                # Формат без заголовка
+                                new_field = f"{actual_field_name}:{field_width}:{field_order}"
+                            else:
+                                # Формат с заголовком
+                                new_field = f"{actual_field_name}:{field_header}:{field_width}:{field_order}"
+                            
+                            current_fields_config.append(new_field)
+                            print(f"✓ Добавлено поле: {actual_field_name} (заголовок: {field_header}, ширина: {field_width}, порядок: {field_order})")
+                    except ValueError as e:
+                        print(f"⚠️  Некорректный формат: {e}")
+                        print("⚠️  Использование: field add <поле> или <поле:ширина> или <поле:заголовок:ширина[:порядок]>")
+                else:
+                    print("⚠️  Некорректный формат. Укажите хотя бы имя поля.")
+                    print("⚠️  Использование: field add <поле> или <поле:ширина> или <поле:заголовок:ширина[:порядок]>")
+            else:
+                print("⚠️  Использование: field add <поле> или <поле:ширина> или <поле:заголовок:ширина[:порядок]>")
+            continue
+        
+        # Команда: field del <имя>
+        if command_lower.startswith('field del '):
+            parts = command.split(maxsplit=2)
+            if len(parts) == 3:
+                field_name = parts[2]
+                
+                # Поиск поля с учетом регистра
+                # Извлекаем имена полей из текущей конфигурации и ищем совпадение
+                field_name_lower = field_name.lower()
+                actual_field_name = None
+                
+                for field_config in current_fields_config:
+                    config_field_name = field_config.split(':')[0]
+                    if config_field_name.lower() == field_name_lower:
+                        actual_field_name = config_field_name
                         break
+                
+                if actual_field_name:
+                    # Удаляем поле с правильным именем
+                    original_count = len(current_fields_config)
+                    current_fields_config = [f for f in current_fields_config if f.split(':')[0] != actual_field_name]
+                    
+                    if len(current_fields_config) < original_count:
+                        print(f"✓ Удалено поле: {actual_field_name}")
+                    
+                    # Проверка, что остался хотя бы один столбец
+                    if not current_fields_config:
+                        print("⚠️  Невозможно удалить все поля. Восстановлены настройки по умолчанию.")
+                        current_fields_config = ['nickname:Логин:15:1', 'name.first:Имя:15:2', 'name.last:Фамилия:15:3', 'isAdmin:Админ:8:4', 'isEnabled:Активен:9:5']
+                else:
+                    print(f"⚠️  Поле '{field_name}' не найдено в списке")
+            else:
+                print("⚠️  Использование: field del <имя>")
+            continue
+        
+        # Команда: attrib <номер>
+        if command_lower.startswith('attrib '):
+            if settings is None:
+                print("⚠️  Команда недоступна: не указан объект настроек (settings)")
+                continue
+            
+            parts = command.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                user_number = int(parts[1])
+                
+                # Получаем отсортированный список пользователей
+                sorted_users = get_sorted_users()
+                
+                # Проверяем корректность номера (нумерация с 1)
+                if 1 <= user_number <= len(sorted_users):
+                    user = sorted_users[user_number - 1]
+                    user_id = user.get('id')
+                    
+                    if user_id:
+                        print(f"\n{'='*80}")
+                        print(f"Получение атрибутов пользователя #{user_number}: {user.get('nickname', 'N/A')}")
+                        print(f"{'='*80}\n")
+                        
+                        # Вызов функции показа атрибутов без сохранения в файл
+                        show_one_user_attributes(settings, user_id, departments=None, save_to_file=False)
+                        
+                        print(f"\n{'='*80}")
+                        print("Нажмите Enter для продолжения...")
+                        print(f"{'='*80}")
+                        input()
+                    else:
+                        print(f"⚠️  Не удалось получить ID пользователя #{user_number}")
+                else:
+                    print(f"⚠️  Некорректный номер пользователя. Доступны номера: 1-{len(sorted_users)}")
+            else:
+                print("⚠️  Использование: attrib <номер>")
+            continue
+        
+        # Неизвестная команда
+        print(f"⚠️  Неизвестная команда: '{command}'")
+        print("Введите Enter для выхода или используйте доступные команды.")
 
-            if not found_flag:
-                logger.error(f"User {searched} not found in Y360 organization.")
 
-        return break_flag, double_users_flag, users_to_add, answer
+def find_users_prompt(settings: "SettingParams"):
+    print("\n=== Поиск пользователей ===")
+    print("\nПоиск всех пользователей: * (звездочка)")
+    print("Справка: ? (вопросительный знак)")
+    print("Выход: пустая строка (Enter)")
+    
+    while True:
+        double_users_flag = False
+        
+        answer = input("\nИскать: ")
+
+        # Обработка специальных команд
+        if not answer.strip():
+            # Пустая строка - выход из цикла
+            logger.info("Выход из режима поиска пользователей.")
+            return
+        
+        if answer.strip() == "?":
+            # Показать справку и продолжить
+            show_search_help()
+            continue
+        
+        if answer.strip() == "*":
+            # Поиск всех пользователей
+            answer = ""
+
+        users = get_extended_api360_users(settings)
+        if not users:
+            logger.info("No users found in Y360 organization.")
+            print("❌ Пользователи не найдены в организации Y360.")
+            continue
+
+        # Определяем тип запроса
+        if is_complex_query(answer):
+            # Сложный поиск
+            logger.info("Обнаружен сложный запрос поиска")
+            try:
+                users_to_add = execute_complex_query(users, answer, settings)
+                if users_to_add:
+                    logger.info(f"Найдено пользователей: {len(users_to_add)}")
+                    for user in users_to_add:
+                        logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                else:
+                    logger.error("Пользователи не найдены по заданным критериям")
+                    continue
+            except Exception as e:
+                logger.error(f"Ошибка при выполнении сложного запроса: {e}")
+                continue
+        else:
+            # Простой поиск (существующая логика)
+            logger.info("Выполняется простой запрос поиска")
+            
+            # Если пустая строка после обработки "*", получить всех пользователей
+            if not answer.strip():
+                users_to_add = users
+                logger.info(f"Получены все пользователи: {len(users_to_add)}")
+            else:
+                pattern = r'[;,\s]+'
+                search_users = re.split(pattern, answer)
+                users_to_add = []
+
+                for searched in search_users:
+                    if "@" in searched.strip():
+                        searched = searched.split("@")[0]
+                    found_flag = False
+                    
+                    # Проверка на ID - wildcards не поддерживаются
+                    searched_cleaned = searched.strip().replace('*', '')
+                    if all(char.isdigit() for char in searched_cleaned):
+                        # Если в поиске по ID используется wildcard, выводим ошибку
+                        if '*' in searched.strip():
+                            logger.error(f"Wildcard (*) не может быть использован при поиске по ID: {searched}")
+                            continue
+                            
+                        if len(searched.strip()) == 16 and searched.strip().startswith("113"):
+                            for user in users:
+                                if user['id'] == searched.strip():
+                                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                                    users_to_add.append(user)
+                                    found_flag = True
+                                    break
+
+                    else:
+                        found_last_name_user = []
+                        for user in users:
+                            aliases_lower_case = [r.lower() for r in user['aliases']]
+                            
+                            # Проверка nickname с поддержкой wildcard
+                            if wildcard_match(user['nickname'], searched.strip()):
+                                logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                                users_to_add.append(user)
+                                found_flag = True
+                                break
+                            
+                            # Проверка алиасов с поддержкой wildcard
+                            for alias in aliases_lower_case:
+                                if wildcard_match(alias, searched.strip()):
+                                    logger.debug(f"User found: {user['nickname']} ({user['id']})")
+                                    users_to_add.append(user)
+                                    found_flag = True
+                                    break
+                            
+                            if found_flag:
+                                break
+                            
+                            # Проверка фамилии с поддержкой wildcard
+                            if wildcard_contains(user['name']['last'], searched.strip()):
+                                found_last_name_user.append(user)
+                                
+                        if not found_flag and found_last_name_user:
+                            if len(found_last_name_user) == 1:
+                                logger.debug(f"User found ({searched}): {found_last_name_user[0]['nickname']} ({found_last_name_user[0]['id']}, {found_last_name_user[0]['position']})")
+                                users_to_add.append(found_last_name_user[0])
+                                found_flag = True
+                            else:
+                                logger.error(f"User {searched} found more than one user:")
+                                for user in found_last_name_user:
+                                    logger.error(f" - last name {user['name']['last']}, nickname {user['nickname']} ({user['id']}, {user['position']})")
+                                logger.error("Refine your search parameters.")
+                                double_users_flag = True
+                                break
+
+                    if not found_flag:
+                        logger.error(f"User {searched} not found in Y360 organization.")
+
+        # Если были найдены дублирующиеся пользователи, продолжить запрос
+        if double_users_flag:
+            continue
+        
+        # Сохранить результаты поиска в файлы
+        if users_to_add:
+            logger.info("Выгрузка атрибутов найденных пользователей в файл.")
+            download_users_attrib_to_file(settings, users_to_add)
+            download_users_attrib_to_file_short(settings, users_to_add, answer if answer else "*")
+            print(f"✅ Найдено пользователей: {len(users_to_add)}. Результаты сохранены в файл.")
+            
+            # Отображение списка пользователей в консоли
+            interactive_display_users(users_to_add, settings)
+        else:
+            print("❌ Пользователи не найдены.")
+        
+        # Продолжить цикл для следующего запроса
 
 def test_add_aliases_prompt(settings: "SettingParams"):
     """
