@@ -1,0 +1,79 @@
+# Файл алиасов для поисковых атрибутов пользователей Yandex 360
+# Формат: алиас=реальный_атрибут|инверсия|тип_контакта|тип_данных
+# где:
+#   - алиас: удобное имя для поиска (может быть на русском)
+#   - реальный_атрибут: имя атрибута в API Yandex 360
+#   - инверсия: true/false (для инверсии логических значений, например blocked = NOT enabled)
+#   - тип_контакта: phone/email (для атрибута contacts, иначе пусто)
+#   - тип_данных: date/array (для специальной обработки, иначе пусто)
+#
+# Пустые строки и строки, начинающиеся с #, игнорируются
+# Поля разделяются символом |
+# Если поле не используется, оставьте его пустым
+
+# name.first алиасы
+first_name=name.first|||
+имя=name.first|||
+first=name.first|||
+
+# name.last алиасы
+last_name=name.last|||
+фамилия=name.last|||
+last=name.last|||
+
+# name.middle алиасы
+middle_name=name.middle|||
+отчество=name.middle|||
+middle=name.middle|||
+
+# isAdmin алиасы
+admin=isAdmin|||
+админ=isAdmin|||
+is_admin=isAdmin|||
+
+# isEnabled алиасы
+enabled=isEnabled|||
+is_enabled=isEnabled|||
+
+# isEnabled алиасы с инверсией (заблокирован = NOT isEnabled)
+blocked=isEnabled|true||
+заблокирован=isEnabled|true||
+
+# position алиасы
+должность=position|||
+
+# department алиасы
+department=department|||
+подразделение=department|||
+ou=department|||
+dep=department|||
+
+# nickname алиасы
+алиас=nickname|||
+
+# aliases алиасы (массив алиасов)
+aliases=aliases|||array
+алиасы=aliases|||array
+
+# contacts - phone алиасы
+телефон=contacts||phone|
+phone=contacts||phone|
+work_phone=contacts||phone|
+mobile_phone=contacts||phone|
+
+# contacts - email алиасы
+почта=contacts||email|
+mail=contacts||email|
+email=contacts||email|
+
+# date атрибуты - createdAt
+created=createdAt|||date
+создан=createdAt|||date
+
+# date атрибуты - isEnabledUpdatedAt
+дата_блокировки=isEnabledUpdatedAt|||date
+
+# date атрибуты - updatedAt
+updated=updatedAt|||date
+изменен=updatedAt|||date
+
