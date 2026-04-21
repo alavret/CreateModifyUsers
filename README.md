@@ -893,6 +893,9 @@ python add_users.py
 | directory:write_departments | создавать подразделения и записывать в атрибуты подразделений |
 | directory:read_groups  | читать состав групп |
 | directory:write_groups  | читать состав групп |
+| directory:read_organization | читать информацию об организации |
+| ya360_admin:mail_read_shared_mailbox_inventory | читать данные об общих ящиков |
+| ya360_admin:mail_read_shared_mailbox_inventory | создавать и модифицировать общие ящики |
 
 <img src="images/create_app_new_3.jpg" width="600">
 
