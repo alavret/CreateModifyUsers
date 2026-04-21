@@ -19,6 +19,7 @@ from email.header import Header
 import secrets
 import string
 import glob
+import traceback
 
 
 DEFAULT_360_API_URL = "https://api360.yandex.net"
@@ -482,9 +483,9 @@ def add_users_from_file_phase_3(settings: "SettingParams", users: list):
 
     logger.info('Проверка, есть ли пользователи с is_admin = true.')
     for user in users:
-        if user['isAdmin']:
+        if user["existing_user"]['isAdmin']:
             logger.info(f'Пользователь {user["login"]} имеет isAdmin = true. Установка этого значения.')
-            patch_user_by_api(settings, user_id=user["id"], patch_data={"isAdmin": "true"})
+            patch_user_by_api(settings, user_id=user["existing_user"]["id"], patch_data={"isAdmin": "true"})
 
     logger.info('Работа с подразделениями пользователей.')
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
@@ -2655,7 +2656,7 @@ def get_settings():
         if hard_error:
             logger.error("OAUTH_TOKEN не является действительным или не имеет необходимых прав доступа")
             oauth_token_bad = True
-        if not result_ok:
+        elif not result_ok:
             print("ВНИМАНИЕ: Функциональность скрипта может быть ограничена. Возможны ошибки при работе с API.")
             print("=" * 100)
             input("Нажмите Enter для продолжения..")
@@ -3370,7 +3371,7 @@ def create_dep_from_prepared_list(settings: "SettingParams", deps_list, max_leve
                     need_update_deps = True
             #all_deps_from_api = organization.get_departments_list()
             if need_update_deps:
-                api_prepared_list = generate_deps_hierarchy_from_api(settings)
+                api_prepared_list = generate_deps_hierarchy_from_api(settings, force=True, )
             for item in deps_to_add:
                 # Ищем в списке департаментов в 360 конкретное значение
                 #d = next(i for i in all_deps_from_api if i['name'] == item['current'] and i['parentId'] == item['prevId'])
@@ -6987,8 +6988,13 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\nCtrl+C pressed. До свидания!")
         sys.exit(EXIT_CODE)
-    except Exception as e:
-        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno}: {e}")
+    except Exception as exc:
+        tb = traceback.extract_tb(exc.__traceback__)
+        last_frame = tb[-1] if tb else None
+        if last_frame:
+            logger.error(f"{type(exc).__name__} at {last_frame.filename}:{last_frame.lineno} in {last_frame.name}: {exc}")
+        else:
+            logger.error(f"{type(exc).__name__}: {exc}")
         sys.exit(EXIT_CODE)
     
     
