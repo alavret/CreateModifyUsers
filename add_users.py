@@ -483,9 +483,20 @@ def add_users_from_file_phase_3(settings: "SettingParams", users: list):
 
     logger.info('Проверка, есть ли пользователи с is_admin = true.')
     for user in users:
-        if user["existing_user"]['isAdmin']:
-            logger.info(f'Пользователь {user["login"]} имеет isAdmin = true. Установка этого значения.')
-            patch_user_by_api(settings, user_id=user["existing_user"]["id"], patch_data={"isAdmin": "true"})
+        existing = user.get("existing_user")
+        if existing is not None:
+            if not existing.get("isAdmin"):
+                continue
+            user_id = existing["id"]
+        else:
+            is_admin_flag = user.get("isAdmin", user.get("is_admin", "false"))
+            if str(is_admin_flag).lower() != "true":
+                continue
+            user_id = user.get("id")
+            if not user_id:
+                continue
+        logger.info(f'Пользователь {user["login"]} имеет isAdmin = true. Установка этого значения.')
+        patch_user_by_api(settings, user_id=user_id, patch_data={"isAdmin": "true"})
 
     logger.info('Работа с подразделениями пользователей.')
     api_deps_hierarchy = generate_deps_hierarchy_from_api(settings)
@@ -1330,11 +1341,11 @@ def validate_login(settings: "SettingParams", alias: str):
             break
 
     if no_conflicts:
-        pattern = r'^[a-z0-9.-]+$'
+        pattern = r'^[a-z0-9._-]+$'
         if not re.match(pattern, alias):
             return False, []
-        if alias.startswith('_'):
-            return False, []
+        # if alias.startswith('_'):
+        #     return False, []
     
     return no_conflicts, conflicts
 
