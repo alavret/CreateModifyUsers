@@ -1304,7 +1304,7 @@ def update_users_from_file(settings: "SettingParams"):
 
 # Регулярное выражение для проверки фамилии
 def validate_name(line):
-    pattern = r'^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _-]*$'
+    pattern = r'^[А-Яа-яЁёA-Za-z0-9][А-Яа-яЁёA-Za-z0-9\s._\-№«»(){}\[\]]*$'
     if re.match(pattern, line):
         return True
     return False
