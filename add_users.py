@@ -397,9 +397,9 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
         return
     logger.info(f'Добавление {len(users)} пользователей в Y360.')
     logger.info("-" * 100)
-    user = {}
     added_users = []
     for u in users:
+        user = {}
         user["name"] = {
             "first": u.get('first'),
             "last": u.get('last'),
@@ -432,6 +432,8 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
         
         if u.get('personal_email',''):
             user["about"] = json.dumps({"personal_email": u.get('personal_email')})
+
+        user = remove_empty_values(user)
 
         if u["department"].isdigit():
             user["departmentId"] = u['department']
@@ -1854,6 +1856,34 @@ def mask_csv_line_safe(line: str) -> str:
     
     # Собираем строку обратно
     return ";".join(masked_fields)
+
+def remove_empty_values(value):
+    """
+    Рекурсивно удаляет пустые значения из JSON-совместимой структуры.
+
+    API Яндекс 360 валидирует некоторые необязательные поля (например,
+    position, gender, birthday). Если передать их как пустые строки, API
+    возвращает 400 "Некорректные данные". Пустые значения должны быть
+    исключены из тела запроса.
+    """
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            cleaned_item = remove_empty_values(item)
+            if cleaned_item not in ("", None, {}, []):
+                cleaned[key] = cleaned_item
+        return cleaned
+
+    if isinstance(value, list):
+        cleaned = []
+        for item in value:
+            cleaned_item = remove_empty_values(item)
+            if cleaned_item not in ("", None, {}, []):
+                cleaned.append(cleaned_item)
+        return cleaned
+
+    return value
+
 
 def mask_sensitive_data(data: dict) -> dict:
     """
