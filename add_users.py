@@ -431,7 +431,14 @@ def add_users_from_file_phase_2(settings: "SettingParams", users: list):
             })
         
         if u.get('personal_email',''):
-            user["about"] = json.dumps({"personal_email": u.get('personal_email')})
+            if settings.write_personal_email_to_contacts:
+                user["contacts"].append({
+                    "type": "email",
+                    "value": u.get('personal_email'),
+                    "label": "Personal"
+                })
+            else:
+                user["about"] = json.dumps({"personal_email": u.get('personal_email')})
 
         if u["department"].isdigit():
             user["departmentId"] = u['department']
@@ -1038,6 +1045,7 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
             update_contacts = False
             found_mobile = False
             found_work = False
+            found_personal_email = False
             # Копируем существующие контакты, кроме телефонов (которые будем обновлять)
             for contact in existing_user.get('contacts', []):
                 if not contact['synthetic']:
@@ -1072,6 +1080,22 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                                 elif u.get('work_phone') and not u.get('work_phone').strip():
                                     update_contacts = True
                                     found_work = True
+                        elif settings.write_personal_email_to_contacts and contact['type'] == 'email' and contact.get('label', '').lower() == 'personal':
+                            found_personal_email = True
+                            temp_personal_email = u.get('personal_email', '')
+                            if temp_personal_email and temp_personal_email.strip():
+                                if contact['value'] != temp_personal_email.strip():
+                                    contact['value'] = temp_personal_email.strip()
+                                    new_contacts.append(contact)
+                                    update_contacts = True
+                                else:
+                                    new_contacts.append(contact)
+                            elif temp_personal_email and not temp_personal_email.strip():
+                                # Символ очистки - контакт email/Personal не добавляется и будет удален
+                                update_contacts = True
+                            else:
+                                # Пустое значение во входном файле - оставляем прежний контакт
+                                new_contacts.append(contact)
                         else:   
                             new_contacts.append(contact)
             
@@ -1093,13 +1117,22 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                     })
                     update_contacts = True
                     found_work = True
+            if not found_personal_email and settings.write_personal_email_to_contacts:
+                temp_personal_email = u.get('personal_email', '')
+                if temp_personal_email and temp_personal_email.strip():
+                    new_contacts.append({
+                        'type': 'email',
+                        'value': temp_personal_email.strip(),
+                        'label': 'Personal',
+                    })
+                    update_contacts = True
             if new_contacts and update_contacts:
                 changes['contacts'] = new_contacts
                 logger.debug("Обновление контактов")
  
             
-            # Обновление personal_email в поле about
-            if u.get('personal_email'):
+            # Обновление personal_email в поле about (только если запись в Contacts отключена)
+            if u.get('personal_email') and not settings.write_personal_email_to_contacts:
                 # Безопасно извлекаем about в словарь
                 about_dict = {}
                 existing_about = existing_user.get('about', '')
@@ -1114,7 +1147,7 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
                 if u.get('personal_email').strip():
                     about_dict['personal_email'] = u.get('personal_email').strip()
                 else:
-                    del about_dict['personal_email']
+                    about_dict.pop('personal_email', None)
                 if about_dict:
                     new_about = json.dumps(about_dict, ensure_ascii=False)
                 else:
@@ -1209,17 +1242,27 @@ def update_users_from_file_phase_2(settings: "SettingParams", users: list):
 
                     # Если пароль был изменен - отправляем письмо
                     if password_changed:
-                        # Извлекаем personal_email из about
+                        # Извлекаем personal_email из CSV или из данных пользователя
                         personal_email = u.get('personal_email', '')
+                        if personal_email and not personal_email.strip():
+                            # Символ очистки - считаем, что email не задан
+                            personal_email = ''
                         if not personal_email:
-                            # Пытаемся извлечь из existing_user
-                            try:
-                                about_data = json.loads(existing_user.get('about', '{}'))
-                                personal_email = about_data.get('personal_email', '')
-                            except Exception:
-                                pass
+                            if settings.write_personal_email_to_contacts:
+                                # Ищем в контактах пользователя
+                                for c in existing_user.get('contacts', []):
+                                    if c.get('type') == 'email' and c.get('label', '').lower() == 'personal':
+                                        personal_email = c.get('value', '')
+                                        break
+                            else:
+                                # Пытаемся извлечь из about
+                                try:
+                                    about_data = json.loads(existing_user.get('about', '{}'))
+                                    personal_email = about_data.get('personal_email', '')
+                                except Exception:
+                                    pass
                         
-                        if personal_email.strip():
+                        if personal_email and personal_email.strip():
                             email_data = {
                                 'first': u.get('first') or existing_user['name'].get('first'),
                                 'middle': u.get('middle') or existing_user['name'].get('middle'),
@@ -2613,6 +2656,7 @@ class SettingParams:
     short_file_dir : str
     search_aliases_file : str
     display_users_fields_file : str
+    write_personal_email_to_contacts : bool
 
 def get_settings():
     exit_flag = False
@@ -2648,6 +2692,7 @@ def get_settings():
         short_file_dir = os.environ.get("SHORT_FILE_DIR", "."),
         search_aliases_file = os.environ.get("SEARCH_ALIASES_FILE", "search_aliases.txt"),
         display_users_fields_file = os.environ.get("DISPLAY_USERS_IN_CONSOLE_FIELDS", "fields_spec.txt"),
+        write_personal_email_to_contacts = os.environ.get("WRITE_PERSONAL_EMAIL_TO_CONTACTS", "false").lower() == "true",
     )
 
     if not settings.users_file:
