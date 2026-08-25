@@ -29,7 +29,7 @@ class RemoveEmptyValuesTest(unittest.TestCase):
         )
 
     def test_create_user_payload_does_not_send_empty_optional_csv_fields(self):
-        settings = SimpleNamespace(dry_run=False, send_welcome_email=False)
+        settings = SimpleNamespace(dry_run=False, send_welcome_email=False, write_personal_email_to_contacts=False)
         users = [
             {
                 "first": "Ольга",
